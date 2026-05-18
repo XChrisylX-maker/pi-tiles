@@ -26,6 +26,15 @@ import { authenticatePiUser, createMockPiUser, PI_INTEGRATION_STATUS, requestVip
 import type { PiUser } from '../pi/piClient'
 import { useAutoSubmit } from '../hooks/useAutoSubmit'
 import { useCountdown } from '../hooks/useCountdown'
+import {
+  playComboSound,
+  playDangerSound,
+  playMatchSound,
+  playStartSound,
+  playSuccessSound,
+  playSwapSound,
+  playTapSound,
+} from '../audio/audioEngine'
 
 type IconName = 'sparkles' | 'shield' | 'zap' | 'crown' | 'server' | 'wallet'
 
@@ -88,9 +97,10 @@ export function PiTilesGame() {
   )
 
   const animationTimers = useRef<Array<ReturnType<typeof setTimeout>>>([])
+  const lastDangerTick = useRef<number | null>(null)
 
   const [vipMembers] = useState(247)
-  const { weeklyPool, platformRevenue } = useMemo(() => calculateRewardPool(vipMembers), [vipMembers])
+  const { weeklyPool } = useMemo(() => calculateRewardPool(vipMembers), [vipMembers])
 
   useEffect(() => {
     let mounted = true
@@ -106,10 +116,19 @@ export function PiTilesGame() {
     }
   }, [])
 
+  useEffect(() => {
+    if (!playing || timeLeft <= 0 || timeLeft > 10) return
+    if (lastDangerTick.current === timeLeft) return
+
+    lastDangerTick.current = timeLeft
+    playDangerSound()
+  }, [playing, timeLeft])
+
   const selectedLabel = selected === null ? '—' : getTileSymbol(board[selected])
   const nextRewardPreview = useMemo(() => `${3 * 3 * 10 * combo}+`, [combo])
   const isCriticalTimer = playing && timeLeft <= 10
   const isHotCombo = combo >= 5
+  const isRealPiAuth = !piUser.fallbackMode
 
   const clearAnimationTimers = useCallback(() => {
     animationTimers.current.forEach((timer) => clearTimeout(timer))
@@ -120,6 +139,8 @@ export function PiTilesGame() {
 
   const start = useCallback(() => {
     clearAnimationTimers()
+    playStartSound()
+    lastDangerTick.current = null
     setBoard(makeBoard())
     setSelected(null)
     setLastSwap([])
@@ -176,6 +197,7 @@ export function PiTilesGame() {
 
       const acceptedEntry = result.entry
 
+      playSuccessSound()
       setLastPayload(payload)
       setLeaderboard((rows) => mergeLeaderboardEntry(rows, acceptedEntry))
       setSubmitted(true)
@@ -237,6 +259,11 @@ export function PiTilesGame() {
       return
     }
 
+    playMatchSound()
+    if (result.combo >= 5) {
+      playComboSound()
+    }
+
     setBoard(swapped)
     setScore((currentScore) => currentScore + result.gained)
     setCombo(result.combo)
@@ -279,20 +306,24 @@ export function PiTilesGame() {
     if (!playing || isAnimatingResolution) return
 
     if (selected === null) {
+      playTapSound()
       setSelected(index)
       return
     }
 
     if (selected === index) {
+      playTapSound()
       setSelected(null)
       return
     }
 
     if (!areNeighbors(selected, index)) {
+      playTapSound()
       setSelected(index)
       return
     }
 
+    playSwapSound()
     resolveSwap(selected, index)
   }
 
@@ -336,6 +367,11 @@ export function PiTilesGame() {
               </div>
 
               <h1>Pi Tiles</h1>
+
+              <div className={`pi-user-badge ${isRealPiAuth ? 'is-sdk' : 'is-mock'}`}>
+                <span>{isRealPiAuth ? 'Pi SDK Connected' : 'Mock Mode'}</span>
+                <strong>{playerName || piUser.username}</strong>
+              </div>
             </div>
 
             <div
@@ -443,7 +479,7 @@ export function PiTilesGame() {
               <div className="pill">{VIP_PRICE_PI} Pi / week</div>
             </div>
 
-            <p>20% of VIP revenue feeds the reward pool. Weekly rewards go to the top 10 VIP players on the board.</p>
+            <p>VIP memberships help fund the weekly Pi prize pool.</p>
 
             <div className="reward-grid">
               <div>
@@ -453,12 +489,7 @@ export function PiTilesGame() {
 
               <div className="reward-pool-cell">
                 <strong className="tone-emerald">{weeklyPool.toFixed(2)} Pi</strong>
-                <span>Reward Pool</span>
-              </div>
-
-              <div>
-                <strong className="tone-cyan">{platformRevenue.toFixed(2)} Pi</strong>
-                <span>Platform Cut</span>
+                <span>Weekly Prize Pool</span>
               </div>
             </div>
 
