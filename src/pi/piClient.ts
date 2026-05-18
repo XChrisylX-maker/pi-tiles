@@ -130,7 +130,7 @@ export async function authenticatePiUser(): Promise<PiUser> {
 }
 
 export async function requestVipPayment(): Promise<VipPaymentResult> {
-  if (!isPiBrowser() || !window.Pi?.createPayment) {
+  if (!isPiBrowser()) {
     console.info('[Pi SDK] Mock VIP payment accepted.')
 
     return {
@@ -143,11 +143,25 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
 
   initPiSdk()
 
+  const pi = window.Pi
+  const createPayment = pi?.createPayment
+
+  if (!createPayment) {
+    console.info('[Pi SDK] createPayment unavailable, using mock fallback.')
+
+    return {
+      paid: true,
+      transactionId: 'mock-vip-payment',
+      paymentId: 'mock-vip-payment-id',
+      fallbackMode: true,
+    }
+  }
+
   return new Promise((resolve) => {
     const paymentIdentifier = `pi-tiles-vip-${Date.now()}`
 
     try {
-      window.Pi.createPayment(
+      createPayment(
         {
           amount: VIP_PRICE_PI,
           memo: `Pi Tiles VIP Pass - ${VIP_PASS_DAYS} days`,
