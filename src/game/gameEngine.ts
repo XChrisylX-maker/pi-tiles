@@ -7,7 +7,13 @@ export const ANTI_CHEAT_VERSION = 'placeholder-v1'
 export const SYMBOLS = ['π', '✦', '⬢', '◈', '⬡'] as const
 
 export type TileSymbol = (typeof SYMBOLS)[number]
-export type Board = TileSymbol[]
+
+export type Tile = {
+  id: string
+  symbol: TileSymbol
+}
+
+export type Board = Tile[]
 
 export type ResolveBoardResult = {
   board: Board
@@ -53,8 +59,31 @@ export const SYMBOL_STYLES: Record<TileSymbol, string> = {
   '⬡': 'tile-ring',
 }
 
+let tileIdCounter = 0
+
+function createTileId(): string {
+  tileIdCounter += 1
+
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return crypto.randomUUID()
+  }
+
+  return `tile-${Date.now()}-${tileIdCounter}`
+}
+
 export function randomSymbol(): TileSymbol {
   return SYMBOLS[Math.floor(Math.random() * SYMBOLS.length)]
+}
+
+export function makeTile(symbol: TileSymbol = randomSymbol()): Tile {
+  return {
+    id: createTileId(),
+    symbol,
+  }
+}
+
+function symbolAt(board: Board, index: number): TileSymbol {
+  return board[index].symbol
 }
 
 export function findMatches(board: Board): number[] {
@@ -64,8 +93,8 @@ export function findMatches(board: Board): number[] {
     let runStart = 0
 
     for (let col = 1; col <= BOARD_SIZE; col += 1) {
-      const current = col < BOARD_SIZE ? board[row * BOARD_SIZE + col] : null
-      const previous = board[row * BOARD_SIZE + runStart]
+      const current = col < BOARD_SIZE ? symbolAt(board, row * BOARD_SIZE + col) : null
+      const previous = symbolAt(board, row * BOARD_SIZE + runStart)
 
       if (current !== previous) {
         const runLength = col - runStart
@@ -83,8 +112,8 @@ export function findMatches(board: Board): number[] {
     let runStart = 0
 
     for (let row = 1; row <= BOARD_SIZE; row += 1) {
-      const current = row < BOARD_SIZE ? board[row * BOARD_SIZE + col] : null
-      const previous = board[runStart * BOARD_SIZE + col]
+      const current = row < BOARD_SIZE ? symbolAt(board, row * BOARD_SIZE + col) : null
+      const previous = symbolAt(board, runStart * BOARD_SIZE + col)
 
       if (current !== previous) {
         const runLength = row - runStart
@@ -107,29 +136,38 @@ export function applyGravityRefill(board: Board, matches: number[]): GravityRefi
   const matched = new Set(matches)
 
   for (let col = 0; col < BOARD_SIZE; col += 1) {
-    const survivors: Array<{ symbol: TileSymbol; row: number }> = []
+    const survivors: Array<{ tile: Tile; row: number }> = []
 
     for (let row = 0; row < BOARD_SIZE; row += 1) {
       const index = row * BOARD_SIZE + col
+
       if (!matched.has(index)) {
-        survivors.push({ symbol: board[index], row })
+        survivors.push({ tile: board[index], row })
       }
     }
 
     const spawnCount = BOARD_SIZE - survivors.length
-    const newSymbols = Array.from({ length: spawnCount }, randomSymbol)
-    const refilledColumn = [...newSymbols, ...survivors]
+    const newTiles = Array.from({ length: spawnCount }, () => ({
+      tile: makeTile(),
+      row: -1,
+      isNew: true,
+    }))
+
+    const refilledColumn: Array<{ tile: Tile; row: number; isNew?: boolean }> = [
+      ...newTiles,
+      ...survivors,
+    ]
 
     for (let row = 0; row < BOARD_SIZE; row += 1) {
       const cell = refilledColumn[row]
       const index = row * BOARD_SIZE + col
 
-      if (typeof cell === 'string') {
-        next[index] = cell
+      next[index] = cell.tile
+
+      if (cell.isNew) {
         fallDistances[index] = spawnCount - row
       } else {
-        next[index] = cell.symbol
-        fallDistances[index] = row - cell.row
+        fallDistances[index] = Math.max(0, row - cell.row)
       }
     }
   }
@@ -155,6 +193,7 @@ export function resolveBoard(board: Board, startingCombo = 1): ResolveBoardResul
     totalMatched += matches.length
     cascadeCount += 1
     lastMatches = matches
+
     const refill = applyGravityRefill(current, matches)
     current = refill.board
     lastFallDistances = refill.fallDistances
@@ -173,7 +212,7 @@ export function resolveBoard(board: Board, startingCombo = 1): ResolveBoardResul
 }
 
 export function makeBoard(): Board {
-  return resolveBoard(Array.from({ length: BOARD_SIZE * BOARD_SIZE }, randomSymbol)).board
+  return resolveBoard(Array.from({ length: BOARD_SIZE * BOARD_SIZE }, () => makeTile())).board
 }
 
 export function areNeighbors(a: number, b: number): boolean {
@@ -198,7 +237,8 @@ export function currentWeekLabel(date = new Date()): string {
 }
 
 export function hashBoard(board: Board): string {
-  const bytes = new TextEncoder().encode(board.join(''))
+  const boardSignature = board.map((tile) => tile.symbol).join('')
+  const bytes = new TextEncoder().encode(boardSignature)
   let binary = ''
 
   bytes.forEach((byte) => {

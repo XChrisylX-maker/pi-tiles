@@ -41,6 +41,7 @@ const ICONS: Record<IconName, string> = {
 const COMBO_CALLOUTS = ['CHAIN', 'MEGA', 'ULTRA'] as const
 const MATCH_FLASH_MS = 300
 const REFILL_ANIMATION_MS = 430
+const TILE_SIZE_PX = 58
 
 function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
   return (
@@ -48,6 +49,14 @@ function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
       {ICONS[name]}
     </span>
   )
+}
+
+function getTileSymbol(tile: Board[number]) {
+  return typeof tile === 'string' ? tile : tile.symbol
+}
+
+function getTileId(tile: Board[number], index: number) {
+  return typeof tile === 'string' ? `legacy-tile-${index}-${tile}` : tile.id
 }
 
 export function PiTilesGame() {
@@ -77,6 +86,7 @@ export function PiTilesGame() {
   const [securityNote, setSecurityNote] = useState(
     'Anti-cheat MVP active: scores submit only after a real game.',
   )
+
   const animationTimers = useRef<Array<ReturnType<typeof setTimeout>>>([])
 
   const [vipMembers] = useState(247)
@@ -96,7 +106,7 @@ export function PiTilesGame() {
     }
   }, [])
 
-  const selectedLabel = selected === null ? '—' : board[selected]
+  const selectedLabel = selected === null ? '—' : getTileSymbol(board[selected])
   const nextRewardPreview = useMemo(() => `${3 * 3 * 10 * combo}+`, [combo])
   const isCriticalTimer = playing && timeLeft <= 10
   const isHotCombo = combo >= 5
@@ -165,6 +175,7 @@ export function PiTilesGame() {
       }
 
       const acceptedEntry = result.entry
+
       setLastPayload(payload)
       setLeaderboard((rows) => mergeLeaderboardEntry(rows, acceptedEntry))
       setSubmitted(true)
@@ -206,6 +217,7 @@ export function PiTilesGame() {
 
   function resolveSwap(a: number, b: number) {
     clearAnimationTimers()
+
     const swapped = swapCells(board, a, b)
     const result = resolveBoard(swapped, combo)
     const firstMatches = findMatches(swapped)
@@ -234,9 +246,13 @@ export function PiTilesGame() {
     setIsRefilling(false)
     setIsAnimatingResolution(true)
     setComboBurst((burst) => burst + 1)
+
     setComboCallout(
-      result.combo >= 5 ? COMBO_CALLOUTS[(result.gained + result.matched + result.cascades + validMoves) % COMBO_CALLOUTS.length] : null,
+      result.combo >= 5
+        ? COMBO_CALLOUTS[(result.gained + result.matched + result.cascades + validMoves) % COMBO_CALLOUTS.length]
+        : null,
     )
+
     setSecurityNote('Matches validated: gravity refill and cascades resolved.')
     setMessage(
       result.cascades > 1
@@ -246,10 +262,10 @@ export function PiTilesGame() {
 
     animationTimers.current.push(
       setTimeout(() => {
-        setBoard(result.board)
         setLastMatches([])
-        setFallDistances(result.fallDistances)
+        setFallDistances(result.fallDistances ?? [])
         setIsRefilling(true)
+        setBoard(result.board)
       }, MATCH_FLASH_MS),
       setTimeout(() => {
         setFallDistances([])
@@ -298,6 +314,7 @@ export function PiTilesGame() {
   return (
     <main className={`pi-shell ${isCriticalTimer ? 'timer-danger' : ''}`}>
       <div className="pi-bg" />
+
       <div className="pi-particles" aria-hidden="true">
         <span />
         <span />
@@ -317,10 +334,14 @@ export function PiTilesGame() {
                 <Icon name="sparkles" tone="tone-amber" />
                 <span>Pi Network Arcade</span>
               </div>
+
               <h1>Pi Tiles</h1>
             </div>
 
-            <div className={`time-badge ${playing ? 'is-playing' : ''} ${isCriticalTimer ? 'is-critical' : ''}`} aria-live="polite">
+            <div
+              className={`time-badge ${playing ? 'is-playing' : ''} ${isCriticalTimer ? 'is-critical' : ''}`}
+              aria-live="polite"
+            >
               <div>{timeLeft}</div>
               <span>seconds</span>
             </div>
@@ -359,20 +380,22 @@ export function PiTilesGame() {
             }`}
           >
             <div className="tile-board">
-              {board.map((symbol, index) => {
+              {board.map((tile, index) => {
+                const symbol = getTileSymbol(tile)
                 const active = selected === index
                 const swapped = lastSwap.includes(index)
                 const matched = lastMatches.includes(index)
+                const fallDistance = fallDistances[index] || 0
 
                 return (
                   <button
-                    key={`${index}-${symbol}-${comboBurst}`}
+                    key={getTileId(tile, index)}
                     type="button"
                     onClick={() => tapCell(index)}
-                    style={{ '--fall-y': `${-(fallDistances[index] || 0) * 58}px` } as CSSProperties}
+                    style={{ '--fall-y': `${-fallDistance * TILE_SIZE_PX}px` } as CSSProperties}
                     className={`tile ${SYMBOL_STYLES[symbol]} ${active ? 'is-active' : ''} ${swapped ? 'is-swapped' : ''} ${
                       matched ? 'is-matched' : ''
-                    }`}
+                    } ${fallDistance > 0 ? 'is-falling' : ''}`}
                     aria-label={`Tile ${symbol} ${index + 1}`}
                   >
                     <span>{symbol}</span>
@@ -387,10 +410,12 @@ export function PiTilesGame() {
               <strong>{selectedLabel}</strong>
               <span>selected</span>
             </div>
+
             <div className="mini-card">
               <strong className="tone-emerald">{validMoves}</strong>
               <span>valid swaps</span>
             </div>
+
             <div className="mini-card">
               <strong className="tone-amber">{nextRewardPreview}</strong>
               <span>next gain</span>
@@ -402,6 +427,7 @@ export function PiTilesGame() {
               <Icon name="zap" />
               {playing ? 'Restart' : 'Start Game'}
             </button>
+
             <button type="button" onClick={() => void toggleVipMock()} className="secondary-button">
               {isVip ? 'VIP Mock' : 'Free Mock'}
             </button>
@@ -413,22 +439,23 @@ export function PiTilesGame() {
                 <Icon name="crown" tone="tone-amber" />
                 <h2>VIP Pass</h2>
               </div>
+
               <div className="pill">{VIP_PRICE_PI} Pi / week</div>
             </div>
 
-            <p>
-              20% of VIP revenue feeds the reward pool. Weekly rewards go to the top 10 VIP players on the board.
-            </p>
+            <p>20% of VIP revenue feeds the reward pool. Weekly rewards go to the top 10 VIP players on the board.</p>
 
             <div className="reward-grid">
               <div>
                 <strong className="tone-amber">{vipMembers}</strong>
                 <span>Active VIPs</span>
               </div>
+
               <div className="reward-pool-cell">
                 <strong className="tone-emerald">{weeklyPool.toFixed(2)} Pi</strong>
                 <span>Reward Pool</span>
               </div>
+
               <div>
                 <strong className="tone-cyan">{platformRevenue.toFixed(2)} Pi</strong>
                 <span>Platform Cut</span>
@@ -448,12 +475,14 @@ export function PiTilesGame() {
               <Icon name="server" tone="tone-cyan" />
               <h2>Codex / Pi App Studio</h2>
             </div>
+
             <div className="integration-grid">
               <div>Auth Pi: {piUser.fallbackMode ? 'mock' : PI_INTEGRATION_STATUS.auth}</div>
               <div>Payments: {PI_INTEGRATION_STATUS.payments}</div>
               <div>Leaderboard: {PI_INTEGRATION_STATUS.leaderboard}</div>
               <div>Rewards: {PI_INTEGRATION_STATUS.rewards}</div>
             </div>
+
             <div className="payload-box">
               Last server payload: {lastPayload ? `${lastPayload.username} · ${lastPayload.score} pts · ${lastPayload.week}` : 'no score submitted'}
             </div>
@@ -465,6 +494,7 @@ export function PiTilesGame() {
                 <h2>Global Leaderboard • VIP Circuit</h2>
                 <p>{currentWeekLabel()}</p>
               </div>
+
               <button type="button" onClick={rerollLeaderboard} className="ghost-button">
                 Refresh
               </button>
@@ -477,6 +507,7 @@ export function PiTilesGame() {
                 placeholder="Pioneer Name"
                 aria-label="Pioneer Name"
               />
+
               <button type="button" onClick={() => void submitScore()} disabled={submitted || score <= 0} className="submit-button">
                 Submit
               </button>
@@ -490,17 +521,17 @@ export function PiTilesGame() {
                 return (
                   <div
                     key={row.id}
-                    className={`leaderboard-row ${row.isPlayer ? 'is-player' : ''} ${row.vip ? 'is-vip' : ''} ${
-                      index < 3 ? 'is-podium' : ''
-                    }`}
+                    className={`leaderboard-row ${row.isPlayer ? 'is-player' : ''} ${row.vip ? 'is-vip' : ''} ${index < 3 ? 'is-podium' : ''}`}
                   >
                     <div className="leaderboard-player">
                       <div className={`rank rank-${index + 1}`}>#{index + 1}</div>
+
                       <div className="player-copy">
                         <div className="player-name">
                           <span>{row.name}</span>
                           {row.vip && <em>VIP #{vipRank}</em>}
                         </div>
+
                         <small>{row.games} games played</small>
                       </div>
                     </div>
@@ -520,6 +551,7 @@ export function PiTilesGame() {
               <Icon name="wallet" tone="tone-amber" />
               <h2>Production checklist</h2>
             </div>
+
             <p>1. Replace mock user with Pi.authenticate().</p>
             <p>2. Replace VIP toggle with server-verified Pi payment.</p>
             <p>3. Send score payload to backend and rescore server-side.</p>
