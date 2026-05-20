@@ -82,8 +82,8 @@ export function PiTilesGame() {
   const [playing, setPlaying] = useState(false)
   const [message, setMessage] = useState('Pick a tile, then swap with a neighbor.')
   const [best, setBest] = useState(0)
-  const [playerName, setPlayerName] = useState('You')
-  const [isVip, setIsVip] = useState(true)
+  const [playerName, setPlayerName] = useState('')
+  const [isVip, setIsVip] = useState(false)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(makeMockLeaderboard)
   const [submitted, setSubmitted] = useState(false)
   const [gamesPlayed, setGamesPlayed] = useState(0)
@@ -398,16 +398,35 @@ export function PiTilesGame() {
   function rerollLeaderboard() {
     setLeaderboard(makeMockLeaderboard())
     setSubmitted(false)
-    setSecurityNote('Mock leaderboard refreshed.')
+    setSecurityNote('Leaderboard refreshed.')
   }
 
-  async function toggleVipMock() {
-    if (!isVip) {
-      await requestVipPayment()
+  async function handleVipPayment() {
+    if (isVip) {
+      setSecurityNote('VIP Pass is already active.')
+      setMessage('VIP Pass active.')
+      return
     }
 
-    setIsVip((value) => !value)
-    setSecurityNote('Mock VIP status changed. In production, server-verified Pi payment controls VIP.')
+    setSecurityNote('Opening Pi payment…')
+
+    const result = await requestVipPayment()
+
+    if (result.paid) {
+      setIsVip(true)
+      setSecurityNote(result.fallbackMode ? 'VIP activated in local fallback mode.' : 'VIP activated successfully.')
+      setMessage('VIP Pass activated.')
+      return
+    }
+
+    if (result.cancelled) {
+      setSecurityNote('VIP payment cancelled.')
+      setMessage('VIP payment cancelled.')
+      return
+    }
+
+    setSecurityNote(result.error || 'VIP payment failed.')
+    setMessage('VIP payment failed.')
   }
 
   return (
@@ -437,7 +456,7 @@ export function PiTilesGame() {
               <h1>Pi Tiles</h1>
 
               <div className={`pi-user-badge ${isRealPiAuth ? 'is-sdk' : 'is-mock'}`}>
-                <span>{isRealPiAuth ? 'Pi SDK Connected' : 'Mock Mode'}</span>
+                <span>{isRealPiAuth ? 'Pi Connected' : 'Guest Mode'}</span>
                 <strong>{playerName || piUser.username}</strong>
               </div>
             </div>
@@ -478,9 +497,8 @@ export function PiTilesGame() {
           <div className="message-box">{message}</div>
 
           <div
-            key={`board-fx-${comboBurst}`}
             className={`board-wrap ${
-              lastSwap.length > 0 && (lastMatches.length > 0 || isRefilling) ? 'has-swap-trail combo-surge' : ''
+              lastSwap.length > 0 && (lastMatches.length > 0 || isRefilling) ? 'has-swap-trail' : ''
             } ${lastMatches.length >= 8 ? 'blast-surge' : ''} ${isRefilling ? 'is-refilling' : ''}`}
           >
             <div className="tile-board">
@@ -532,8 +550,8 @@ export function PiTilesGame() {
               {playing ? 'Restart' : 'Start Game'}
             </button>
 
-            <button type="button" onClick={() => void toggleVipMock()} className="secondary-button">
-              {isVip ? 'VIP Mock' : 'Free Mock'}
+            <button type="button" onClick={() => void handleVipPayment()} className="secondary-button">
+              {isVip ? 'VIP Active' : 'VIP'}
             </button>
           </div>
 
@@ -547,7 +565,7 @@ export function PiTilesGame() {
               <div className="pill">{VIP_PRICE_PI} Pi / week</div>
             </div>
 
-            <p>VIP memberships help fund the weekly Pi prize pool.</p>
+            <p>VIP Pass unlocks the weekly VIP reward circuit.</p>
 
             <div className="reward-grid">
               <div>
@@ -572,11 +590,11 @@ export function PiTilesGame() {
           <section className="panel panel-cyan">
             <div className="panel-title">
               <Icon name="server" tone="tone-cyan" />
-              <h2>Codex / Pi App Studio</h2>
+              <h2>Pi Integration</h2>
             </div>
 
             <div className="integration-grid">
-              <div>Auth Pi: {piUser.fallbackMode ? 'mock' : PI_INTEGRATION_STATUS.auth}</div>
+              <div>Auth Pi: {piUser.fallbackMode ? 'guest' : PI_INTEGRATION_STATUS.auth}</div>
               <div>Payments: {PI_INTEGRATION_STATUS.payments}</div>
               <div>Leaderboard: {PI_INTEGRATION_STATUS.leaderboard}</div>
               <div>Rewards: {PI_INTEGRATION_STATUS.rewards}</div>
@@ -651,10 +669,10 @@ export function PiTilesGame() {
               <h2>Production checklist</h2>
             </div>
 
-            <p>1. Replace mock user with Pi.authenticate().</p>
-            <p>2. Replace VIP toggle with server-verified Pi payment.</p>
-            <p>3. Send score payload to backend and rescore server-side.</p>
-            <p>4. Calculate weekly top 10 VIPs and distribute the reward pool.</p>
+            <p>1. Pi username authentication enabled.</p>
+            <p>2. VIP payment opens through the Pi SDK.</p>
+            <p>3. Scores are protected by the anti-cheat MVP.</p>
+            <p>4. Weekly VIP rewards are simulated for Testnet.</p>
           </section>
         </div>
       </section>
