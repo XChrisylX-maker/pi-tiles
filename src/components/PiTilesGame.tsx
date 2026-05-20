@@ -71,6 +71,7 @@ function getTileId(tile: Board[number], index: number) {
 
 export function PiTilesGame() {
   const [piUser, setPiUser] = useState<PiUser>(createMockPiUser)
+  const [isConnectingPi, setIsConnectingPi] = useState(false)
   const [board, setBoard] = useState<Board>(makeBoard)
   const [selected, setSelected] = useState<number | null>(null)
   const [lastSwap, setLastSwap] = useState<number[]>([])
@@ -104,17 +105,7 @@ export function PiTilesGame() {
   const { weeklyPool } = useMemo(() => calculateRewardPool(vipMembers), [vipMembers])
 
   useEffect(() => {
-    let mounted = true
-
-    authenticatePiUser().then((user) => {
-      if (!mounted) return
-      setPiUser(user)
-      setPlayerName((currentName) => currentName || user.username)
-    })
-
-    return () => {
-      mounted = false
-    }
+    setSecurityNote('Connect Pioneer to enable Pi username and VIP payment.')
   }, [])
 
   useEffect(() => {
@@ -401,10 +392,46 @@ export function PiTilesGame() {
     setSecurityNote('Leaderboard refreshed.')
   }
 
+  async function connectPioneer() {
+    if (isConnectingPi) return
+
+    setIsConnectingPi(true)
+    setSecurityNote('Opening Pi authentication…')
+
+    try {
+      const user = await authenticatePiUser()
+
+      setPiUser(user)
+      setPlayerName((currentName) => currentName || user.username)
+
+      if (user.fallbackMode) {
+        setSecurityNote('Pi authentication unavailable. Open the app from Pi Browser / PiNet.')
+        setMessage('Connect Pioneer unavailable.')
+        return
+      }
+
+      setSecurityNote(`Pioneer connected: ${user.username}`)
+      setMessage(`Welcome, ${user.username}.`)
+    } catch (error) {
+      console.error('[PiTiles] Pioneer connection failed:', error)
+      setSecurityNote(error instanceof Error ? error.message : 'Pioneer connection failed.')
+      setMessage('Pioneer connection failed.')
+    } finally {
+      setIsConnectingPi(false)
+    }
+  }
+
   async function handleVipPayment() {
     if (isVip) {
       setSecurityNote('VIP Pass is already active.')
       setMessage('VIP Pass active.')
+      return
+    }
+
+    if (!isRealPiAuth) {
+      setSecurityNote('Connect Pioneer before opening VIP payment.')
+      setMessage('Connect Pioneer first.')
+      await connectPioneer()
       return
     }
 
@@ -459,6 +486,17 @@ export function PiTilesGame() {
                 <span>{isRealPiAuth ? 'Pi Connected' : 'Guest Mode'}</span>
                 <strong>{playerName || piUser.username}</strong>
               </div>
+
+              {!isRealPiAuth && (
+                <button
+                  type="button"
+                  onClick={() => void connectPioneer()}
+                  className="ghost-button connect-pioneer-button"
+                  disabled={isConnectingPi}
+                >
+                  {isConnectingPi ? 'Connecting…' : 'Connect Pioneer'}
+                </button>
+              )}
             </div>
 
             <div
