@@ -36,8 +36,8 @@ type PiPayment = {
 }
 
 type PiPaymentCallbacks = {
-  onReadyForServerApproval?: (paymentId: string) => void
-  onReadyForServerCompletion?: (paymentId: string, txid: string) => void
+  onReadyForServerApproval?: (paymentId: string) => void | Promise<void>
+  onReadyForServerCompletion?: (paymentId: string, txid: string) => void | Promise<void>
   onCancel?: (paymentId: string) => void
   onError?: (error: Error | unknown, payment?: unknown) => void
 }
@@ -58,6 +58,11 @@ declare global {
 const PI_SDK_VERSION = '2.0'
 const VIP_PRICE_PI = 1
 const VIP_PASS_DAYS = 7
+const PI_SDK_INJECTION_ATTEMPTS = 30
+const PI_SDK_INJECTION_DELAY_MS = 150
+
+let piSdkInitialized = false
+let piSdkInitPromise: Promise<boolean> | null = null
 
 export const PI_INTEGRATION_STATUS: PiIntegrationStatus = {
   auth: 'sdk',
@@ -80,62 +85,115 @@ export function createMockPiUser(): PiUser {
   }
 }
 
-export async function initPiSdk() {
+function makeFallbackId(prefix: string) {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
+    return `${prefix}-${crypto.randomUUID()}`
+  }
+
+  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
+
+async function waitForPiSdk() {
   if (typeof window === 'undefined') return false
 
-  // Pi Browser injects window.Pi asynchronously on some devices.
-  // Waiting briefly prevents early authenticate/createPayment calls from failing
-  // with "Pi Network SDK was not initialized".
-  for (let attempt = 0; attempt < 20; attempt += 1) {
-    if (window.Pi?.init) break
+  for (let attempt = 0; attempt < PI_SDK_INJECTION_ATTEMPTS; attempt += 1) {
+    if (window.Pi?.init) return true
 
     await new Promise((resolve) => {
-      setTimeout(resolve, 150)
+      setTimeout(resolve, PI_SDK_INJECTION_DELAY_MS)
     })
   }
 
-  if (!window.Pi?.init) {
-    console.warn('[Pi SDK] Pi Browser SDK unavailable.')
-    return false
+  return Boolean(window.Pi?.init)
+}
+
+export async function initPiSdk() {
+  if (piSdkInitialized) return true
+
+  if (piSdkInitPromise) {
+    return piSdkInitPromise
   }
 
-  try {
-    window.Pi.init({
-      version: PI_SDK_VERSION,
-      sandbox: true,
-    })
+  piSdkInitPromise = (async () => {
+    const sdkAvailable = await waitForPiSdk()
 
-    console.info('[Pi SDK] initialized.')
+    if (!sdkAvailable || !window.Pi?.init) {
+      console.warn('[Pi SDK] Pi Browser SDK unavailable.')
+      return false
+    }
 
-    return true
-  } catch (error) {
-    console.error('[Pi SDK] init failed:', error)
-    return false
+    try {
+      window.Pi.init({
+        version: PI_SDK_VERSION,
+        sandbox: true,
+      })
+
+      piSdkInitialized = true
+      console.info('[Pi SDK] initialized.')
+
+      return true
+    } catch (error) {
+      console.error('[Pi SDK] init failed:', error)
+      piSdkInitialized = false
+      piSdkInitPromise = null
+
+      return false
+    }
+  })()
+
+  return piSdkInitPromise
+}
+
+async function postJson<TResponse>(url: string, body: Record<string, unknown>): Promise<TResponse> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '')
+    throw new Error(`${url} failed with ${response.status}${text ? `: ${text}` : ''}`)
   }
+
+  return response.json() as Promise<TResponse>
+}
+
+async function approvePayment(paymentId: string, identifier: string) {
+  return postJson<{ approved?: boolean }>('/api/pi/payments/approve', {
+    paymentId,
+    identifier,
+  })
+}
+
+async function completePayment(paymentId: string, txid: string, identifier: string) {
+  return postJson<{ completed?: boolean }>('/api/pi/payments/complete', {
+    paymentId,
+    txid,
+    identifier,
+  })
 }
 
 export async function authenticatePiUser(): Promise<PiUser> {
-  if (!isPiBrowser() || !window.Pi?.authenticate) {
+  const sdkInitialized = await initPiSdk()
+
+  if (!sdkInitialized || !window.Pi?.authenticate) {
     console.info('[Pi SDK] Running in mock auth mode.')
     return createMockPiUser()
   }
-
-  await initPiSdk()
 
   try {
     const auth = await window.Pi.authenticate(
       ['username', 'payments'],
       (incompletePayment) => {
         console.info('[Pi SDK] Incomplete payment found:', incompletePayment)
-
-        // Production TODO:
-        // Send incompletePayment.identifier/paymentId to the backend.
-        // The backend should check payment status and complete/cancel if needed.
       },
     )
 
     return {
-      piUid: auth.uid || crypto.randomUUID(),
+      piUid: auth.uid || makeFallbackId('pi-user'),
       username: auth.username || 'Pioneer',
       accessToken: auth.accessToken || '',
       isAuthenticated: true,
@@ -148,23 +206,9 @@ export async function authenticatePiUser(): Promise<PiUser> {
 }
 
 export async function requestVipPayment(): Promise<VipPaymentResult> {
-  if (!isPiBrowser()) {
-    console.info('[Pi SDK] Mock VIP payment accepted.')
+  const sdkInitialized = await initPiSdk()
 
-    return {
-      paid: true,
-      transactionId: 'mock-vip-payment',
-      paymentId: 'mock-vip-payment-id',
-      fallbackMode: true,
-    }
-  }
-
-  await initPiSdk()
-
-  const pi = window.Pi
-  const createPayment = pi?.createPayment
-
-  if (!createPayment) {
+  if (!sdkInitialized || !window.Pi?.createPayment) {
     console.info('[Pi SDK] createPayment unavailable, using mock fallback.')
 
     return {
@@ -175,53 +219,86 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
     }
   }
 
+  const paymentIdentifier = `playpitiles-vip-${Date.now()}`
+
   return new Promise((resolve) => {
-    const paymentIdentifier = `pi-tiles-vip-${Date.now()}`
+    let resolved = false
+
+    const finish = (result: VipPaymentResult) => {
+      if (resolved) return
+      resolved = true
+      resolve(result)
+    }
 
     try {
-      createPayment(
+      window.Pi?.createPayment?.(
         {
           amount: VIP_PRICE_PI,
-          memo: `Pi Tiles VIP Pass - ${VIP_PASS_DAYS} days`,
+          memo: `PlayPiTiles VIP Pass - ${VIP_PASS_DAYS} days`,
           metadata: {
-            app: 'pi-tiles',
+            app: 'playpitiles',
             feature: 'vip-pass',
             durationDays: VIP_PASS_DAYS,
+            identifier: paymentIdentifier,
             createdAt: new Date().toISOString(),
           },
           identifier: paymentIdentifier,
         },
         {
-          onReadyForServerApproval(paymentId) {
+          async onReadyForServerApproval(paymentId) {
             console.info('[Pi SDK] Ready for server approval:', paymentId)
 
-            // Production TODO:
-            // POST /api/pi/payments/approve
-            // body: { paymentId, identifier: paymentIdentifier }
-            // Backend must call Pi Platform approve endpoint.
+            try {
+              await approvePayment(paymentId, paymentIdentifier)
+              console.info('[Pi SDK] Payment approved by backend:', paymentId)
+            } catch (error) {
+              console.error('[Pi SDK] Backend approval failed:', error)
+
+              finish({
+                paid: false,
+                paymentId,
+                fallbackMode: false,
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Backend payment approval failed',
+              })
+            }
           },
 
-          onReadyForServerCompletion(paymentId, txid) {
+          async onReadyForServerCompletion(paymentId, txid) {
             console.info('[Pi SDK] Ready for server completion:', paymentId, txid)
 
-            // Production TODO:
-            // POST /api/pi/payments/complete
-            // body: { paymentId, txid, identifier: paymentIdentifier }
-            // Backend must call Pi Platform complete endpoint,
-            // then set user.vipUntil = now + 7 days.
+            try {
+              await completePayment(paymentId, txid, paymentIdentifier)
+              console.info('[Pi SDK] Payment completed by backend:', paymentId, txid)
 
-            resolve({
-              paid: true,
-              transactionId: txid,
-              paymentId,
-              fallbackMode: false,
-            })
+              finish({
+                paid: true,
+                transactionId: txid,
+                paymentId,
+                fallbackMode: false,
+              })
+            } catch (error) {
+              console.error('[Pi SDK] Backend completion failed:', error)
+
+              finish({
+                paid: false,
+                transactionId: txid,
+                paymentId,
+                fallbackMode: false,
+                error:
+                  error instanceof Error
+                    ? error.message
+                    : 'Backend payment completion failed',
+              })
+            }
           },
 
           onCancel(paymentId) {
             console.warn('[Pi SDK] Payment cancelled:', paymentId)
 
-            resolve({
+            finish({
               paid: false,
               paymentId,
               fallbackMode: false,
@@ -232,7 +309,7 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
           onError(error, payment) {
             console.error('[Pi SDK] Payment error:', error, payment)
 
-            resolve({
+            finish({
               paid: false,
               fallbackMode: false,
               error: error instanceof Error ? error.message : 'Unknown Pi payment error',
@@ -243,7 +320,7 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
     } catch (error) {
       console.error('[Pi SDK] createPayment failed:', error)
 
-      resolve({
+      finish({
         paid: false,
         fallbackMode: false,
         error: error instanceof Error ? error.message : 'Pi createPayment failed',
