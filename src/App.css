@@ -2351,3 +2351,104 @@
     transform: translate3d(0, 0, 0) scale(1);
   }
 }
+/* =========================================================
+   Pi Tiles — Safe Gravity Polish
+   Tiny visual refinement only.
+   No gameplay / React changes.
+   ========================================================= */
+
+.board-wrap.is-refilling .tile.is-falling {
+  animation:
+    gravity-polish-fall 520ms cubic-bezier(.16,.88,.22,1) both,
+    gravity-polish-glow 420ms ease-out both !important;
+}
+
+@keyframes gravity-polish-fall {
+  0% {
+    opacity: .52;
+    transform:
+      translate3d(0, var(--fall-y, -112px), 0)
+      scale(.96);
+    filter: brightness(1.18) saturate(1.08);
+  }
+
+  58% {
+    transform:
+      translate3d(0, 8px, 0)
+      scale(1.015);
+  }
+
+  78% {
+    transform:
+      translate3d(0, -3px, 0)
+      scale(.998);
+  }
+
+  100% {
+    opacity: 1;
+    transform:
+      translate3d(0, 0, 0)
+      scale(1);
+    filter: brightness(1) saturate(1);
+  }
+}
+
+@keyframes gravity-polish-glow {
+  42% {
+    box-shadow:
+      0 12px 22px rgba(0,0,0,.28),
+      0 0 16px rgba(255,255,255,.16),
+      inset 0 2px 0 rgba(255,255,255,.42);
+  }
+}
+/* =========================================================
+   Pi Browser Mobile Safe Layout
+   ========================================================= */
+
+@media (max-width: 640px) {
+
+  .app-shell,
+  .game-shell,
+  .game-layout {
+    min-height: 100dvh;
+    padding-bottom: env(safe-area-inset-bottom, 18px);
+  }
+
+  .game-panel {
+    padding-bottom: 22px;
+  }
+
+  .board-wrap {
+    margin-bottom: 18px;
+  }
+
+  .controls-row,
+  .bottom-controls,
+  .action-row {
+    position: sticky;
+    bottom: 0;
+    z-index: 40;
+
+    padding-bottom:
+      calc(env(safe-area-inset-bottom, 0px) + 8px);
+
+    backdrop-filter: blur(18px);
+  }
+
+  .primary-button,
+  .restart-button,
+  .vip-button,
+  button {
+    min-height: 56px;
+  }
+
+  /* Slightly reduce board vertical footprint */
+  .board-grid {
+    gap: 10px;
+  }
+
+  .tile {
+    width: 54px;
+    height: 54px;
+  }
+}

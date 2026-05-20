@@ -131,7 +131,7 @@ function addSquareBlast(target: Set<number>, centerRow: number, centerCol: numbe
 }
 
 function addComboShockwave(target: Set<number>, combo: number) {
-  if (combo < 8) return
+  if (combo < 9) return
 
   const center = Math.floor(BOARD_SIZE / 2)
   addSquareBlast(target, center, center, combo >= 10 ? 2 : 1)
