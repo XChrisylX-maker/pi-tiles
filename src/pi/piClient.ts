@@ -80,14 +80,32 @@ export function createMockPiUser(): PiUser {
   }
 }
 
-export function initPiSdk() {
-  if (!isPiBrowser() || !window.Pi?.init) return false
+export async function initPiSdk() {
+  if (typeof window === 'undefined') return false
+
+  // Pi Browser injects window.Pi asynchronously on some devices.
+  // Waiting briefly prevents early authenticate/createPayment calls from failing
+  // with "Pi Network SDK was not initialized".
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    if (window.Pi?.init) break
+
+    await new Promise((resolve) => {
+      setTimeout(resolve, 150)
+    })
+  }
+
+  if (!window.Pi?.init) {
+    console.warn('[Pi SDK] Pi Browser SDK unavailable.')
+    return false
+  }
 
   try {
     window.Pi.init({
       version: PI_SDK_VERSION,
       sandbox: true,
     })
+
+    console.info('[Pi SDK] initialized.')
 
     return true
   } catch (error) {
@@ -102,7 +120,7 @@ export async function authenticatePiUser(): Promise<PiUser> {
     return createMockPiUser()
   }
 
-  initPiSdk()
+  await initPiSdk()
 
   try {
     const auth = await window.Pi.authenticate(
@@ -141,7 +159,7 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
     }
   }
 
-  initPiSdk()
+  await initPiSdk()
 
   const pi = window.Pi
   const createPayment = pi?.createPayment
