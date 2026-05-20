@@ -4,11 +4,14 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>pitiles</title>
+    <title>PlayPiTiles</title>
+    <script src="https://sdk.minepi.com/pi-sdk.js"></script>
+    <script>
+      window.Pi?.init?.({ version: "2.0", sandbox: true });
+    </script>
   </head>
   <body>
     <div id="root"></div>
-    <script src="https://downloads.minepi.com/sdk/v1/prod.js"></script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
