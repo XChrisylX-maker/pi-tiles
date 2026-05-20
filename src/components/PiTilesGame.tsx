@@ -6,7 +6,7 @@ import {
   findMatches,
   makeBoard,
   MIN_VALID_MOVES,
-  resolveBoard,
+  resolveOneStep,
   ROUND_SECONDS,
   swapCells,
   SYMBOL_STYLES,
@@ -47,10 +47,11 @@ const ICONS: Record<IconName, string> = {
   wallet: '◫',
 }
 
-const COMBO_CALLOUTS = ['CHAIN', 'MEGA', 'ULTRA'] as const
+const COMBO_CALLOUTS = ['CHAIN', 'MEGA', 'ULTRA', 'BLAST', 'PI STORM'] as const
 const MATCH_FLASH_MS = 300
 const REFILL_ANIMATION_MS = 430
 const TILE_SIZE_PX = 58
+const MAX_VISIBLE_CASCADES = 6
 
 function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
   return (
@@ -237,17 +238,16 @@ export function PiTilesGame() {
     onAutoSubmit: handleRoundEnd,
   })
 
-  function resolveSwap(a: number, b: number) {
+  async function resolveSwap(a: number, b: number) {
     clearAnimationTimers()
 
     const swapped = swapCells(board, a, b)
-    const result = resolveBoard(swapped, combo)
-    const firstMatches = findMatches(swapped)
+    const previewMatches = findMatches(swapped)
 
     setLastSwap([a, b])
     setSelected(null)
 
-    if (result.cascades === 0) {
+    if (previewMatches.length === 0) {
       setCombo(1)
       setLastMatches([])
       setFallDistances([])
@@ -259,47 +259,115 @@ export function PiTilesGame() {
       return
     }
 
-    playMatchSound()
-    if (result.combo >= 5) {
-      playComboSound()
+    let currentBoard = swapped
+    let currentCombo = combo
+    let totalGained = 0
+    let totalMatched = 0
+    let cascadeCount = 0
+    let reshuffled = false
+    let cascadeLimitReached = false
+
+    setIsAnimatingResolution(true)
+    setBoard(swapped)
+
+    for (let stepIndex = 0; stepIndex < MAX_VISIBLE_CASCADES; stepIndex += 1) {
+      const step = resolveOneStep(currentBoard, currentCombo)
+
+      if (!step.hasMatches) {
+        if (step.wasReshuffled) {
+          reshuffled = true
+          currentBoard = step.board
+          setBoard(step.board)
+          setMessage('Board reshuffled — no moves available.')
+        }
+
+        break
+      }
+
+      cascadeCount += 1
+      totalGained += step.gained
+      totalMatched += step.matched
+      reshuffled = reshuffled || step.wasReshuffled
+
+      playMatchSound()
+
+      if (step.combo >= 5 || step.matched >= 8) {
+        playComboSound()
+      }
+
+      setLastMatches(step.matches)
+      setFallDistances([])
+      setIsRefilling(false)
+      setCombo(step.combo)
+      setScore((currentScore) => currentScore + step.gained)
+      setComboBurst((burst) => burst + 1)
+
+      if (step.combo >= 5 || step.matched >= 8) {
+        const calloutIndex = (step.gained + step.matched + cascadeCount + validMoves) % COMBO_CALLOUTS.length
+        setComboCallout(COMBO_CALLOUTS[calloutIndex])
+      } else {
+        setComboCallout(null)
+      }
+
+      if (step.matched >= 8) {
+        setMessage(`${step.matched} tiles blasted · AREA BLAST · +${step.gained}`)
+      } else {
+        setMessage(`${step.matched} tiles blasted · cascade ${cascadeCount} · +${step.gained}`)
+      }
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, MATCH_FLASH_MS)
+        animationTimers.current.push(timer)
+      })
+
+      setLastMatches([])
+      setFallDistances(step.fallDistances)
+      setIsRefilling(true)
+      setBoard(step.board)
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, REFILL_ANIMATION_MS)
+        animationTimers.current.push(timer)
+      })
+
+      setFallDistances([])
+      setIsRefilling(false)
+
+      currentBoard = step.board
+      currentCombo = step.combo
     }
 
-    setBoard(swapped)
-    setScore((currentScore) => currentScore + result.gained)
-    setCombo(result.combo)
+    if (cascadeCount >= MAX_VISIBLE_CASCADES && findMatches(currentBoard).length > 0) {
+      cascadeLimitReached = true
+      reshuffled = true
+      currentBoard = makeBoard()
+      currentCombo = 1
+      setLastMatches([])
+      setFallDistances([])
+      setIsRefilling(false)
+      setBoard(currentBoard)
+    }
+
     setValidMoves((currentMoves) => currentMoves + 1)
-    setLastMatches(firstMatches)
-    setFallDistances([])
-    setIsRefilling(false)
-    setIsAnimatingResolution(true)
-    setComboBurst((burst) => burst + 1)
+    setCombo(currentCombo)
+    setBoard(currentBoard)
+    setIsAnimatingResolution(false)
 
-    setComboCallout(
-      result.combo >= 5
-        ? COMBO_CALLOUTS[(result.gained + result.matched + result.cascades + validMoves) % COMBO_CALLOUTS.length]
-        : null,
-    )
+    if (cascadeLimitReached) {
+      setSecurityNote('Long cascade safely stabilized to keep the round playable.')
+    } else if (reshuffled) {
+      setSecurityNote('No moves left: board reshuffled automatically after cascades.')
+    } else {
+      setSecurityNote('Matches validated: cascades resolved step by step.')
+    }
 
-    setSecurityNote('Matches validated: gravity refill and cascades resolved.')
-    setMessage(
-      result.cascades > 1
-        ? `${result.matched} tiles cleared · ${result.cascades} cascades · +${result.gained} points`
-        : `${result.matched} tiles cleared · +${result.gained} points`,
-    )
-
-    animationTimers.current.push(
-      setTimeout(() => {
-        setLastMatches([])
-        setFallDistances(result.fallDistances ?? [])
-        setIsRefilling(true)
-        setBoard(result.board)
-      }, MATCH_FLASH_MS),
-      setTimeout(() => {
-        setFallDistances([])
-        setIsRefilling(false)
-        setIsAnimatingResolution(false)
-      }, MATCH_FLASH_MS + REFILL_ANIMATION_MS),
-    )
+    if (cascadeLimitReached) {
+      setMessage(`${totalMatched} tiles blasted · cascade stabilized · +${totalGained} points`)
+    } else if (cascadeCount > 1) {
+      setMessage(`${totalMatched} tiles blasted · ${cascadeCount} cascades · +${totalGained} points`)
+    } else {
+      setMessage(`${totalMatched} tiles blasted · +${totalGained} points`)
+    }
   }
 
   function tapCell(index: number) {
@@ -324,7 +392,7 @@ export function PiTilesGame() {
     }
 
     playSwapSound()
-    resolveSwap(selected, index)
+    void resolveSwap(selected, index)
   }
 
   function rerollLeaderboard() {
@@ -411,9 +479,9 @@ export function PiTilesGame() {
 
           <div
             key={`board-fx-${comboBurst}`}
-            className={`board-wrap ${lastSwap.length > 0 && (lastMatches.length > 0 || isRefilling) ? 'has-swap-trail combo-surge' : ''} ${
-              isRefilling ? 'is-refilling' : ''
-            }`}
+            className={`board-wrap ${
+              lastSwap.length > 0 && (lastMatches.length > 0 || isRefilling) ? 'has-swap-trail combo-surge' : ''
+            } ${lastMatches.length >= 8 ? 'blast-surge' : ''} ${isRefilling ? 'is-refilling' : ''}`}
           >
             <div className="tile-board">
               {board.map((tile, index) => {
@@ -431,7 +499,7 @@ export function PiTilesGame() {
                     style={{ '--fall-y': `${-fallDistance * TILE_SIZE_PX}px` } as CSSProperties}
                     className={`tile ${SYMBOL_STYLES[symbol]} ${active ? 'is-active' : ''} ${swapped ? 'is-swapped' : ''} ${
                       matched ? 'is-matched' : ''
-                    } ${fallDistance > 0 ? 'is-falling' : ''}`}
+                    } ${matched && lastMatches.length >= 8 ? 'is-area-blast' : ''} ${fallDistance > 0 ? 'is-falling' : ''}`}
                     aria-label={`Tile ${symbol} ${index + 1}`}
                   >
                     <span>{symbol}</span>
