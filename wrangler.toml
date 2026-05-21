@@ -2,6 +2,14 @@ name = "pitiles"
 compatibility_date = "2026-05-20"
 main = "./src/worker.ts"
 
+[[routes]]
+pattern = "play-pi-tiles.com"
+custom_domain = true
+
+[[routes]]
+pattern = "www.play-pi-tiles.com"
+custom_domain = true
+
 [assets]
 directory = "./dist"
 binding = "ASSETS"
