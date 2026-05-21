@@ -104,6 +104,18 @@ function withAppHeaders(response: Response) {
   })
 }
 
+function getAssetRequest(request: Request, pathname: string) {
+  if (pathname !== '/privacy' && pathname !== '/privacy/') {
+    return request
+  }
+
+  const url = new URL(request.url)
+  url.pathname = '/'
+  url.search = ''
+
+  return new Request(url, request)
+}
+
 async function readJson<T>(request: Request): Promise<T | null> {
   try {
     return (await request.json()) as T
@@ -433,7 +445,7 @@ export default {
       return apiNotFound(pathname, request.method)
     }
 
-    const assetResponse = await env.ASSETS.fetch(request)
+    const assetResponse = await env.ASSETS.fetch(getAssetRequest(request, pathname))
     return withAppHeaders(assetResponse)
   },
 }

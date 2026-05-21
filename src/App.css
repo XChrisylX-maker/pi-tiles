@@ -2351,6 +2351,88 @@
     transform: translate3d(0, 0, 0) scale(1);
   }
 }
+
+.privacy-shell {
+  min-height: 100dvh;
+  padding: 32px 18px;
+  color: #f8fafc;
+  background:
+    radial-gradient(circle at 15% 0%, rgba(103, 232, 249, 0.18), transparent 32%),
+    radial-gradient(circle at 85% 8%, rgba(217, 70, 239, 0.14), transparent 30%),
+    linear-gradient(145deg, #070816 0%, #10172f 52%, #09071a 100%);
+}
+
+.privacy-page {
+  width: min(100%, 860px);
+  margin: 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 24px;
+  padding: 32px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.105), rgba(255, 255, 255, 0.045)),
+    rgba(8, 9, 24, 0.84);
+  box-shadow:
+    0 28px 80px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18);
+  backdrop-filter: blur(22px);
+}
+
+.privacy-back-link {
+  display: inline-flex;
+  margin-bottom: 24px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 10px 16px;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 14px;
+  font-weight: 800;
+  text-decoration: none;
+}
+
+.privacy-back-link:hover {
+  background: rgba(255, 255, 255, 0.14);
+}
+
+.privacy-page h1 {
+  margin: 0;
+  color: #ffffff;
+  font-size: 42px;
+  line-height: 1;
+}
+
+.privacy-updated {
+  margin-top: 10px;
+  color: #67e8f9;
+  font-weight: 800;
+}
+
+.privacy-page h2 {
+  margin: 30px 0 10px;
+  color: #ffffff;
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.privacy-page p,
+.privacy-page li {
+  color: rgba(248, 250, 252, 0.78);
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.privacy-page p {
+  margin: 0 0 14px;
+}
+
+.privacy-page ul {
+  margin: 0 0 18px;
+  padding-left: 22px;
+}
+
+.privacy-page li {
+  margin: 6px 0;
+}
 /* =========================================================
    Pi Tiles — Safe Gravity Polish
    Tiny visual refinement only.
@@ -2406,6 +2488,30 @@
    ========================================================= */
 
 @media (max-width: 640px) {
+
+  .privacy-shell {
+    padding: 0;
+  }
+
+  .privacy-page {
+    min-height: 100dvh;
+    border-width: 0;
+    border-radius: 0;
+    padding: 24px 18px;
+  }
+
+  .privacy-page h1 {
+    font-size: 34px;
+  }
+
+  .privacy-page h2 {
+    font-size: 20px;
+  }
+
+  .privacy-page p,
+  .privacy-page li {
+    font-size: 15px;
+  }
 
   .pi-shell {
     min-height: 100dvh;
