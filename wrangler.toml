@@ -1,6 +1,8 @@
 name = "pitiles"
 compatibility_date = "2026-05-20"
 main = "./src/worker.ts"
+workers_dev = true
+preview_urls = true
 
 [[routes]]
 pattern = "play-pi-tiles.com"
