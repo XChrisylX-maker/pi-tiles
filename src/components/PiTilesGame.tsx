@@ -15,7 +15,7 @@ import type { Board, ScorePayload } from '../game/gameEngine'
 import {
   calculateRewardPool,
   getVipRank,
-  makeMockLeaderboard,
+  makeSeededLeaderboard,
   mergeLeaderboardEntry,
   rewardForVipRank,
   submitScoreToLeaderboard,
@@ -51,7 +51,7 @@ const COMBO_CALLOUTS = ['CHAIN', 'MEGA', 'ULTRA', 'BLAST', 'PI STORM'] as const
 const MATCH_FLASH_MS = 300
 const REFILL_ANIMATION_MS = 430
 const TILE_SIZE_PX = 58
-const MAX_VISIBLE_CASCADES = 6
+const MAX_VISIBLE_CASCADES = 4
 
 function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
   return (
@@ -70,8 +70,9 @@ function getTileId(tile: Board[number], index: number) {
 }
 
 export function PiTilesGame() {
-  const [piUser, setPiUser] = useState<PiUser>(createMockPiUser)
+  const [piUser, setPiUser] = useState<PiUser | null>(null)
   const [isConnectingPi, setIsConnectingPi] = useState(false)
+
   const [board, setBoard] = useState<Board>(makeBoard)
   const [selected, setSelected] = useState<number | null>(null)
   const [lastSwap, setLastSwap] = useState<number[]>([])
@@ -85,7 +86,7 @@ export function PiTilesGame() {
   const [best, setBest] = useState(0)
   const [playerName, setPlayerName] = useState('')
   const [isVip, setIsVip] = useState(false)
-  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(makeMockLeaderboard)
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(makeSeededLeaderboard)
   const [submitted, setSubmitted] = useState(false)
   const [gamesPlayed, setGamesPlayed] = useState(0)
   const [validMoves, setValidMoves] = useState(0)
@@ -95,17 +96,82 @@ export function PiTilesGame() {
   const [isRefilling, setIsRefilling] = useState(false)
   const [isAnimatingResolution, setIsAnimatingResolution] = useState(false)
   const [securityNote, setSecurityNote] = useState(
-    'Anti-cheat MVP active: scores submit only after a real game.',
+    'Connect Pioneer to enable Pi username and VIP payment.',
   )
 
   const animationTimers = useRef<Array<ReturnType<typeof setTimeout>>>([])
   const lastDangerTick = useRef<number | null>(null)
-
+  const mounted = useRef(true)
+  const connectRequest = useRef<Promise<PiUser> | null>(null)
   const [vipMembers] = useState(247)
   const { weeklyPool } = useMemo(() => calculateRewardPool(vipMembers), [vipMembers])
 
+  const isRealPiAuth = piUser !== null && !piUser.fallbackMode && Boolean(piUser.accessToken)
+  const selectedLabel = selected === null ? '—' : getTileSymbol(board[selected])
+  const nextRewardPreview = useMemo(() => `${3 * 3 * 10 * combo}+`, [combo])
+  const isCriticalTimer = playing && timeLeft <= 10
+  const isHotCombo = combo >= 5
+
+  const clearAnimationTimers = useCallback(() => {
+    animationTimers.current.forEach((timer) => clearTimeout(timer))
+    animationTimers.current = []
+  }, [])
+
+  const connectPioneer = useCallback(async () => {
+    if (connectRequest.current) return connectRequest.current
+    if (piUser?.isAuthenticated && piUser.accessToken) return piUser
+
+    const request = (async () => {
+      setIsConnectingPi(true)
+      setSecurityNote('Opening Pi authentication...')
+
+      try {
+        const user = await authenticatePiUser()
+
+        if (!mounted.current) return user
+
+        setPiUser(user)
+        setPlayerName(user.username)
+
+        if (user.fallbackMode) {
+          setSecurityNote('Pi authentication unavailable. Continuing in guest mode.')
+          setMessage('Guest mode ready.')
+          return user
+        }
+
+        setSecurityNote(`Pioneer connected: ${user.username}`)
+        setMessage(`Welcome, ${user.username}.`)
+        return user
+      } catch (error) {
+        console.error('[PiTiles] Pioneer connection failed:', error)
+        const fallbackUser = createMockPiUser()
+
+        if (mounted.current) {
+          setPiUser(fallbackUser)
+          setSecurityNote(error instanceof Error ? error.message : 'Pioneer connection failed. Continuing in guest mode.')
+          setMessage('Guest mode ready.')
+        }
+
+        return fallbackUser
+      } finally {
+        connectRequest.current = null
+
+        if (mounted.current) {
+          setIsConnectingPi(false)
+        }
+      }
+    })()
+
+    connectRequest.current = request
+    return request
+  }, [piUser])
+
   useEffect(() => {
-    setSecurityNote('Connect Pioneer to enable Pi username and VIP payment.')
+    mounted.current = true
+
+    return () => {
+      mounted.current = false
+    }
   }, [])
 
   useEffect(() => {
@@ -115,17 +181,6 @@ export function PiTilesGame() {
     lastDangerTick.current = timeLeft
     playDangerSound()
   }, [playing, timeLeft])
-
-  const selectedLabel = selected === null ? '—' : getTileSymbol(board[selected])
-  const nextRewardPreview = useMemo(() => `${3 * 3 * 10 * combo}+`, [combo])
-  const isCriticalTimer = playing && timeLeft <= 10
-  const isHotCombo = combo >= 5
-  const isRealPiAuth = !piUser.fallbackMode
-
-  const clearAnimationTimers = useCallback(() => {
-    animationTimers.current.forEach((timer) => clearTimeout(timer))
-    animationTimers.current = []
-  }, [])
 
   useEffect(() => clearAnimationTimers, [clearAnimationTimers])
 
@@ -167,8 +222,13 @@ export function PiTilesGame() {
         return
       }
 
+      const safePiUser = piUser || createMockPiUser()
+
       const payload = buildScorePayload({
-        player: { ...piUser, username: playerName.trim() || piUser.username },
+        player: {
+          ...safePiUser,
+          username: playerName.trim() || safePiUser.username || 'Guest',
+        },
         score: finalScore,
         validMoves,
         board,
@@ -187,11 +247,9 @@ export function PiTilesGame() {
         return
       }
 
-      const acceptedEntry = result.entry
-
       playSuccessSound()
       setLastPayload(payload)
-      setLeaderboard((rows) => mergeLeaderboardEntry(rows, acceptedEntry))
+      setLeaderboard((rows) => mergeLeaderboardEntry(rows, result.entry!))
       setSubmitted(true)
       setGamesPlayed((currentGames) => currentGames + 1)
       setSecurityNote(auto ? 'Score auto-submitted at game end.' : 'Score accepted: leaderboard updated.')
@@ -387,38 +445,9 @@ export function PiTilesGame() {
   }
 
   function rerollLeaderboard() {
-    setLeaderboard(makeMockLeaderboard())
+    setLeaderboard(makeSeededLeaderboard())
     setSubmitted(false)
     setSecurityNote('Leaderboard refreshed.')
-  }
-
-  async function connectPioneer() {
-    if (isConnectingPi) return
-
-    setIsConnectingPi(true)
-    setSecurityNote('Opening Pi authentication…')
-
-    try {
-      const user = await authenticatePiUser()
-
-      setPiUser(user)
-      setPlayerName((currentName) => currentName || user.username)
-
-      if (user.fallbackMode) {
-        setSecurityNote('Pi authentication unavailable. Open the app from Pi Browser / PiNet.')
-        setMessage('Connect Pioneer unavailable.')
-        return
-      }
-
-      setSecurityNote(`Pioneer connected: ${user.username}`)
-      setMessage(`Welcome, ${user.username}.`)
-    } catch (error) {
-      console.error('[PiTiles] Pioneer connection failed:', error)
-      setSecurityNote(error instanceof Error ? error.message : 'Pioneer connection failed.')
-      setMessage('Pioneer connection failed.')
-    } finally {
-      setIsConnectingPi(false)
-    }
   }
 
   async function handleVipPayment() {
@@ -428,10 +457,17 @@ export function PiTilesGame() {
       return
     }
 
-    if (!isRealPiAuth) {
+    let activePiUser = piUser
+
+    if (!activePiUser || activePiUser.fallbackMode || !activePiUser.accessToken) {
       setSecurityNote('Connect Pioneer before opening VIP payment.')
+      setMessage('Connecting Pioneer...')
+      activePiUser = await connectPioneer()
+    }
+
+    if (!activePiUser || activePiUser.fallbackMode || !activePiUser.accessToken) {
+      setSecurityNote('VIP payment blocked: valid Pi authentication required.')
       setMessage('Connect Pioneer first.')
-      await connectPioneer()
       return
     }
 
@@ -441,7 +477,7 @@ export function PiTilesGame() {
 
     if (result.paid) {
       setIsVip(true)
-      setSecurityNote(result.fallbackMode ? 'VIP activated in local fallback mode.' : 'VIP activated successfully.')
+      setSecurityNote('VIP activated successfully.')
       setMessage('VIP Pass activated.')
       return
     }
@@ -482,9 +518,9 @@ export function PiTilesGame() {
 
               <h1>Pi Tiles</h1>
 
-              <div className={`pi-user-badge ${isRealPiAuth ? 'is-sdk' : 'is-mock'}`}>
-                <span>{isRealPiAuth ? 'Pi Connected' : 'Guest Mode'}</span>
-                <strong>{playerName || piUser.username}</strong>
+              <div className={`pi-user-badge ${isRealPiAuth ? 'is-sdk' : 'is-guest'}`}>
+                <span>{isRealPiAuth ? 'Hey ! Pioneer' : 'Guest Mode'}</span>
+                <strong>{playerName || piUser?.username || 'Guest'}</strong>
               </div>
 
               {!isRealPiAuth && (
@@ -494,7 +530,7 @@ export function PiTilesGame() {
                   className="ghost-button connect-pioneer-button"
                   disabled={isConnectingPi}
                 >
-                  {isConnectingPi ? 'Connecting…' : 'Connect Pioneer'}
+                  {isConnectingPi ? 'Signing in...' : 'Sign in with Pi'}
                 </button>
               )}
             </div>
@@ -632,7 +668,7 @@ export function PiTilesGame() {
             </div>
 
             <div className="integration-grid">
-              <div>Auth Pi: {piUser.fallbackMode ? 'guest' : PI_INTEGRATION_STATUS.auth}</div>
+              <div>Auth Pi: {isRealPiAuth ? PI_INTEGRATION_STATUS.auth : 'guest'}</div>
               <div>Payments: {PI_INTEGRATION_STATUS.payments}</div>
               <div>Leaderboard: {PI_INTEGRATION_STATUS.leaderboard}</div>
               <div>Rewards: {PI_INTEGRATION_STATUS.rewards}</div>

@@ -4,7 +4,7 @@ import { validateScoreSubmission } from '../game/gameEngine'
 export const VIP_PRICE_PI = 1
 export const VIP_POOL_SHARE = 0.2
 
-export const MOCK_NAMES = [
+export const SEEDED_PIONEER_NAMES = [
   'PiWolf',
   'CryptoMina',
   'NekoPi',
@@ -45,10 +45,10 @@ export type SubmitScoreResult = {
   reason?: string
 }
 
-export function makeMockLeaderboard(): LeaderboardEntry[] {
-  return MOCK_NAMES.map((name, index) => ({
+export function makeSeededLeaderboard(): LeaderboardEntry[] {
+  return SEEDED_PIONEER_NAMES.map((name, index) => ({
     id: name,
-    piUid: `mock-${name.toLowerCase()}`,
+    piUid: `guest-${name.toLowerCase()}`,
     name,
     score: Math.floor(1800 + Math.random() * 9000) - index * 260,
     games: Math.floor(3 + Math.random() * 24),
