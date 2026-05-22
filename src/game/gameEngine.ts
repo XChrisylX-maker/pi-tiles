@@ -121,20 +121,17 @@ function addIndex(target: Set<number>, row: number, col: number) {
   target.add(indexOf(row, col))
 }
 
-function addLineBlast(target: Set<number>, row: number, col: number, horizontal: boolean) {
-  for (let i = 0; i < BOARD_SIZE; i += 1) {
-    target.add(horizontal ? indexOf(row, i) : indexOf(i, col))
-  }
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value))
 }
 
-function addCrossBlast(target: Set<number>, row: number, col: number) {
-  addLineBlast(target, row, col, true)
-  addLineBlast(target, row, col, false)
-}
+function addPiBombBlast(target: Set<number>, centerRow: number, centerCol: number) {
+  const size = 4
+  const startRow = clamp(centerRow - 1, 0, BOARD_SIZE - size)
+  const startCol = clamp(centerCol - 1, 0, BOARD_SIZE - size)
 
-function addSquareBlast(target: Set<number>, centerRow: number, centerCol: number, radius = 1) {
-  for (let row = centerRow - radius; row <= centerRow + radius; row += 1) {
-    for (let col = centerCol - radius; col <= centerCol + radius; col += 1) {
+  for (let row = startRow; row < startRow + size; row += 1) {
+    for (let col = startCol; col < startCol + size; col += 1) {
       addIndex(target, row, col)
     }
   }
@@ -210,9 +207,6 @@ export function findMatches(board: Board): number[] {
   const matches = new Set<number>()
   const runs = findMatchRuns(board)
 
-  // Important: combo shockwaves must only amplify a real match.
-  // If we add shockwave tiles when runs.length === 0, combo >= 8 creates
-  // endless fake cascades because findMatches() never returns an empty list.
   if (runs.length === 0) {
     return []
   }
@@ -220,26 +214,10 @@ export function findMatches(board: Board): number[] {
   runs.forEach((run) => {
     run.indexes.forEach((index) => matches.add(index))
 
-    const runSymbol = board[run.indexes[0]].symbol
-    const isPiRun = runSymbol === 'π'
     const piBombs = run.indexes.filter((index) => board[index].power === 'pi-bomb')
 
-    // Standard match bonuses for non-Pi symbols.
-    if (!isPiRun && run.length === 4) {
-      addLineBlast(matches, run.row, run.col, run.horizontal)
-    }
-
-    if (!isPiRun && run.length >= 5) {
-      addCrossBlast(matches, run.row, run.col)
-      addSquareBlast(matches, run.row, run.col, 1)
-    }
-
-    if (!isPiRun && run.length >= 6) {
-      addSquareBlast(matches, run.row, run.col, 2)
-    }
-
     piBombs.forEach((index) => {
-      addSquareBlast(matches, rowOf(index), colOf(index), 1)
+      addPiBombBlast(matches, rowOf(index), colOf(index))
     })
   })
 

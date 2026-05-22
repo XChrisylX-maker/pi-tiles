@@ -391,8 +391,6 @@ export function PiTilesGame() {
 
     if (cascadeCount >= MAX_VISIBLE_CASCADES && findMatches(currentBoard).length > 0) {
       cascadeLimitReached = true
-      reshuffled = true
-      currentBoard = makeBoard()
       setLastMatches([])
       setFallDistances([])
       setIsRefilling(false)
@@ -404,7 +402,7 @@ export function PiTilesGame() {
     setIsAnimatingResolution(false)
 
     if (cascadeLimitReached) {
-      setSecurityNote('Long cascade safely stabilized to keep the round playable.')
+      setSecurityNote('Long cascade paused safely without replacing the board.')
     } else if (reshuffled) {
       setSecurityNote('No moves left: board reshuffled automatically after cascades.')
     } else {
@@ -412,7 +410,7 @@ export function PiTilesGame() {
     }
 
     if (cascadeLimitReached) {
-      setMessage(`${totalMatched} tiles blasted · cascade stabilized · +${totalGained} points`)
+      setMessage(`${totalMatched} tiles cleared · cascade paused · +${totalGained} points`)
     } else if (cascadeCount > 1) {
       setMessage(`${totalMatched} tiles blasted · ${cascadeCount} cascades · +${totalGained} points`)
     } else {
