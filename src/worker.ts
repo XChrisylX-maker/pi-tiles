@@ -105,7 +105,9 @@ function withAppHeaders(response: Response) {
 }
 
 function getAssetRequest(request: Request, pathname: string) {
-  if (pathname !== '/privacy' && pathname !== '/privacy/') {
+  const appRoutes = ['/privacy', '/privacy/', '/terms', '/terms/']
+
+  if (!appRoutes.includes(pathname)) {
     return request
   }
 

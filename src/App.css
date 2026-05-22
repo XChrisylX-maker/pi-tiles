@@ -2415,10 +2415,16 @@
 }
 
 .privacy-page p,
-.privacy-page li {
+.privacy-page li,
+.privacy-page a {
   color: rgba(248, 250, 252, 0.78);
   font-size: 16px;
   line-height: 1.7;
+}
+
+.privacy-page a {
+  color: #67e8f9;
+  font-weight: 800;
 }
 
 .privacy-page p {
@@ -2509,7 +2515,8 @@
   }
 
   .privacy-page p,
-  .privacy-page li {
+  .privacy-page li,
+  .privacy-page a {
     font-size: 15px;
   }
 
