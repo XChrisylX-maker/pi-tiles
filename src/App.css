@@ -501,6 +501,7 @@
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
+  touch-action: none;
 }
 
 .tile {
@@ -518,7 +519,7 @@
     inset 0 1px 0 rgba(255, 255, 255, 0.42),
     inset 0 -12px 18px rgba(0, 0, 0, 0.14);
   cursor: pointer;
-  touch-action: manipulation;
+  touch-action: none;
   transition:
     border-color 120ms ease,
     box-shadow 120ms ease,

@@ -1,6 +1,7 @@
-import { type CSSProperties, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type PointerEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   areNeighbors,
+  BOARD_SIZE,
   buildScorePayload,
   currentWeekLabel,
   findMatches,
@@ -52,6 +53,14 @@ const MATCH_FLASH_MS = 300
 const REFILL_ANIMATION_MS = 430
 const TILE_SIZE_PX = 58
 const MAX_VISIBLE_CASCADES = 3
+const SWIPE_THRESHOLD_PX = 22
+
+type TileDragStart = {
+  index: number
+  pointerId: number
+  x: number
+  y: number
+}
 
 function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
   return (
@@ -107,6 +116,8 @@ export function PiTilesGame() {
   const lastDangerTick = useRef<number | null>(null)
   const mounted = useRef(true)
   const connectRequest = useRef<Promise<PiUser> | null>(null)
+  const tileDragStart = useRef<TileDragStart | null>(null)
+  const suppressNextTileClick = useRef(false)
   const [vipMembers] = useState(247)
   const { weeklyPool } = useMemo(() => calculateRewardPool(vipMembers), [vipMembers])
 
@@ -420,6 +431,88 @@ export function PiTilesGame() {
     }
   }
 
+  function getSwipeTarget(index: number, deltaX: number, deltaY: number) {
+    const absX = Math.abs(deltaX)
+    const absY = Math.abs(deltaY)
+
+    if (Math.max(absX, absY) < SWIPE_THRESHOLD_PX) return null
+
+    const row = Math.floor(index / BOARD_SIZE)
+    const col = index % BOARD_SIZE
+
+    if (absX > absY) {
+      if (deltaX > 0 && col < BOARD_SIZE - 1) return index + 1
+      if (deltaX < 0 && col > 0) return index - 1
+      return null
+    }
+
+    if (deltaY > 0 && row < BOARD_SIZE - 1) return index + BOARD_SIZE
+    if (deltaY < 0 && row > 0) return index - BOARD_SIZE
+    return null
+  }
+
+  function handleTilePointerDown(event: PointerEvent<HTMLButtonElement>, index: number) {
+    if (!playing || isAnimatingResolution) return
+
+    tileDragStart.current = {
+      index,
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+    }
+    suppressNextTileClick.current = false
+    event.currentTarget.setPointerCapture(event.pointerId)
+  }
+
+  function handleTilePointerUp(event: PointerEvent<HTMLButtonElement>) {
+    const dragStart = tileDragStart.current
+
+    if (!dragStart || dragStart.pointerId !== event.pointerId) return
+
+    tileDragStart.current = null
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+
+    if (!playing || isAnimatingResolution) return
+
+    const deltaX = event.clientX - dragStart.x
+    const deltaY = event.clientY - dragStart.y
+    const target = getSwipeTarget(dragStart.index, deltaX, deltaY)
+
+    if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) >= SWIPE_THRESHOLD_PX) {
+      suppressNextTileClick.current = true
+    }
+
+    if (target === null || !areNeighbors(dragStart.index, target)) return
+
+    setSelected(null)
+    playSwapSound()
+    void resolveSwap(dragStart.index, target)
+  }
+
+  function handleTilePointerCancel(event: PointerEvent<HTMLButtonElement>) {
+    const dragStart = tileDragStart.current
+
+    if (!dragStart || dragStart.pointerId !== event.pointerId) return
+
+    tileDragStart.current = null
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+  }
+
+  function handleTileClick(index: number) {
+    if (suppressNextTileClick.current) {
+      suppressNextTileClick.current = false
+      return
+    }
+
+    tapCell(index)
+  }
+
   function tapCell(index: number) {
     if (!playing || isAnimatingResolution) return
 
@@ -589,7 +682,10 @@ export function PiTilesGame() {
                   <button
                     key={getTileId(tile, index)}
                     type="button"
-                    onClick={() => tapCell(index)}
+                    onPointerDown={(event) => handleTilePointerDown(event, index)}
+                    onPointerUp={handleTilePointerUp}
+                    onPointerCancel={handleTilePointerCancel}
+                    onClick={() => handleTileClick(index)}
                     style={{ '--fall-y': `${-fallDistance * TILE_SIZE_PX}px` } as CSSProperties}
                     className={`tile ${SYMBOL_STYLES[symbol]} ${active ? 'is-active' : ''} ${swapped ? 'is-swapped' : ''} ${
                       matched ? 'is-matched' : ''
