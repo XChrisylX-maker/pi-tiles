@@ -51,7 +51,7 @@ const COMBO_CALLOUTS = ['CHAIN', 'MEGA', 'ULTRA', 'BLAST', 'PI STORM'] as const
 const MATCH_FLASH_MS = 300
 const REFILL_ANIMATION_MS = 430
 const TILE_SIZE_PX = 58
-const MAX_VISIBLE_CASCADES = 4
+const MAX_VISIBLE_CASCADES = 3
 
 function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
   return (

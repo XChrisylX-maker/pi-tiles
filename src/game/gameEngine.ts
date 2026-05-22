@@ -140,13 +140,6 @@ function addSquareBlast(target: Set<number>, centerRow: number, centerCol: numbe
   }
 }
 
-function addComboShockwave(target: Set<number>, combo: number) {
-  if (combo < 9) return
-
-  const center = Math.floor(BOARD_SIZE / 2)
-  addSquareBlast(target, center, center, combo >= 10 ? 2 : 1)
-}
-
 type RunMatch = {
   indexes: number[]
   length: number
@@ -213,7 +206,7 @@ export function findMatchRuns(board: Board): RunMatch[] {
   return runs
 }
 
-export function findMatches(board: Board, combo = 1): number[] {
+export function findMatches(board: Board): number[] {
   const matches = new Set<number>()
   const runs = findMatchRuns(board)
 
@@ -245,25 +238,10 @@ export function findMatches(board: Board, combo = 1): number[] {
       addSquareBlast(matches, run.row, run.col, 2)
     }
 
-    // Pi-only special blasts.
-    if (isPiRun && run.length === 4) {
-      // Pi Line Blast: a 4-Pi match clears both row and column.
-      addCrossBlast(matches, run.row, run.col)
-    }
-
-    if (isPiRun && run.length >= 6) {
-      // Golden Pi Blast: a 6+ Pi match clears the full board.
-      for (let index = 0; index < BOARD_SIZE * BOARD_SIZE; index += 1) {
-        matches.add(index)
-      }
-    }
-
     piBombs.forEach((index) => {
       addSquareBlast(matches, rowOf(index), colOf(index), 1)
     })
   })
-
-  addComboShockwave(matches, combo)
 
   return Array.from(matches)
 }
@@ -399,7 +377,7 @@ export function applyGravityRefill(board: Board, matches: number[]): GravityRefi
 export function resolveOneStep(board: Board, combo = 1): ResolveStepResult {
   const runs = findMatchRuns(board)
   const createdPiBombs = findCreatedPiBombIndexes(board, runs)
-  const matches = findMatches(board, combo)
+  const matches = findMatches(board)
 
   if (matches.length === 0) {
     const playable = ensurePlayableBoard(board)
@@ -452,7 +430,7 @@ export function resolveBoard(board: Board, startingCombo = 1): ResolveBoardResul
   let lastFallDistances = Array.from({ length: BOARD_SIZE * BOARD_SIZE }, () => 0)
 
   for (let step = 0; step < MAX_CASCADE_STEPS; step += 1) {
-    const matches = findMatches(current, nextCombo)
+    const matches = findMatches(current)
     if (matches.length === 0) break
 
     const gained = matches.length * matches.length * 10 * nextCombo
