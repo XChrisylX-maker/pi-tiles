@@ -1,4 +1,4 @@
-name = "pitiles"
+name = "pi-tiles"
 compatibility_date = "2026-05-20"
 main = "./src/worker.ts"
 workers_dev = true
