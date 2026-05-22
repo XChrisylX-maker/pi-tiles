@@ -7,10 +7,12 @@ export const ANTI_CHEAT_VERSION = 'placeholder-v1'
 export const SYMBOLS = ['π', '✦', '⬢', '◈', '⬡'] as const
 
 export type TileSymbol = (typeof SYMBOLS)[number]
+export type TilePower = 'pi-bomb'
 
 export type Tile = {
   id: string
   symbol: TileSymbol
+  power?: TilePower
 }
 
 export type Board = Tile[]
@@ -100,6 +102,14 @@ function symbolAt(board: Board, index: number): TileSymbol {
 
 function indexOf(row: number, col: number): number {
   return row * BOARD_SIZE + col
+}
+
+function rowOf(index: number): number {
+  return Math.floor(index / BOARD_SIZE)
+}
+
+function colOf(index: number): number {
+  return index % BOARD_SIZE
 }
 
 function isInside(row: number, col: number): boolean {
@@ -219,32 +229,26 @@ export function findMatches(board: Board, combo = 1): number[] {
 
     const runSymbol = board[run.indexes[0]].symbol
     const isPiRun = runSymbol === 'π'
+    const piBombs = run.indexes.filter((index) => board[index].power === 'pi-bomb')
 
-    // Standard match bonuses for all symbols.
-    if (run.length === 4) {
+    // Standard match bonuses for non-Pi symbols.
+    if (!isPiRun && run.length === 4) {
       addLineBlast(matches, run.row, run.col, run.horizontal)
     }
 
-    if (run.length >= 5) {
+    if (!isPiRun && run.length >= 5) {
       addCrossBlast(matches, run.row, run.col)
       addSquareBlast(matches, run.row, run.col, 1)
     }
 
-    if (run.length >= 6) {
+    if (!isPiRun && run.length >= 6) {
       addSquareBlast(matches, run.row, run.col, 2)
     }
 
     // Pi-only special blasts.
-    // These are instant effects, not persistent special tiles, so the board
-    // logic stays simple and safe for V1.
-    if (isPiRun && run.length >= 4) {
+    if (isPiRun && run.length === 4) {
       // Pi Line Blast: a 4-Pi match clears both row and column.
       addCrossBlast(matches, run.row, run.col)
-    }
-
-    if (isPiRun && run.length >= 5) {
-      // Pi Bomb: a 5-Pi match clears a large 5x5 zone around the match center.
-      addSquareBlast(matches, run.row, run.col, 2)
     }
 
     if (isPiRun && run.length >= 6) {
@@ -253,11 +257,30 @@ export function findMatches(board: Board, combo = 1): number[] {
         matches.add(index)
       }
     }
+
+    piBombs.forEach((index) => {
+      addSquareBlast(matches, rowOf(index), colOf(index), 1)
+    })
   })
 
   addComboShockwave(matches, combo)
 
   return Array.from(matches)
+}
+
+function findCreatedPiBombIndexes(board: Board, runs: RunMatch[]): Set<number> {
+  const created = new Set<number>()
+
+  runs.forEach((run) => {
+    const runSymbol = board[run.indexes[0]].symbol
+    const hasExistingBomb = run.indexes.some((index) => board[index].power === 'pi-bomb')
+
+    if (runSymbol === 'π' && run.length === 5 && !hasExistingBomb) {
+      created.add(indexOf(run.row, run.col))
+    }
+  })
+
+  return created
 }
 
 export function hasValidMoves(board: Board): boolean {
@@ -374,6 +397,8 @@ export function applyGravityRefill(board: Board, matches: number[]): GravityRefi
 
 
 export function resolveOneStep(board: Board, combo = 1): ResolveStepResult {
+  const runs = findMatchRuns(board)
+  const createdPiBombs = findCreatedPiBombIndexes(board, runs)
   const matches = findMatches(board, combo)
 
   if (matches.length === 0) {
@@ -391,8 +416,17 @@ export function resolveOneStep(board: Board, combo = 1): ResolveStepResult {
     }
   }
 
+  const removalMatches = matches.filter((index) => !createdPiBombs.has(index))
+  const boardWithCreatedBombs = board.map((tile, index) =>
+    createdPiBombs.has(index)
+      ? {
+          ...tile,
+          power: 'pi-bomb' as const,
+        }
+      : tile,
+  )
   const gained = matches.length * matches.length * 10 * combo
-  const refill = applyGravityRefill(board, matches)
+  const refill = applyGravityRefill(boardWithCreatedBombs, removalMatches)
   const nextCombo = combo + 1
   const playable = ensurePlayableBoard(refill.board)
 
@@ -473,7 +507,7 @@ export function currentWeekLabel(date = new Date()): string {
 }
 
 export function hashBoard(board: Board): string {
-  const boardSignature = board.map((tile) => tile.symbol).join('')
+  const boardSignature = board.map((tile) => `${tile.symbol}${tile.power || ''}`).join('')
   const bytes = new TextEncoder().encode(boardSignature)
   let binary = ''
 

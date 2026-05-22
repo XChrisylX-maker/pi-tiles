@@ -69,6 +69,10 @@ function getTileId(tile: Board[number], index: number) {
   return typeof tile === 'string' ? `legacy-tile-${index}-${tile}` : tile.id
 }
 
+function getTilePower(tile: Board[number]) {
+  return typeof tile === 'string' ? undefined : tile.power
+}
+
 export function PiTilesGame() {
   const [piUser, setPiUser] = useState<PiUser | null>(null)
   const [isConnectingPi, setIsConnectingPi] = useState(false)
@@ -79,7 +83,7 @@ export function PiTilesGame() {
   const [lastMatches, setLastMatches] = useState<number[]>([])
   const [fallDistances, setFallDistances] = useState<number[]>([])
   const [score, setScore] = useState(0)
-  const [combo, setCombo] = useState(1)
+  const [combo, setCombo] = useState(0)
   const [timeLeft, setTimeLeft] = useState(ROUND_SECONDS)
   const [playing, setPlaying] = useState(false)
   const [message, setMessage] = useState('Pick a tile, then swap with a neighbor.')
@@ -108,7 +112,7 @@ export function PiTilesGame() {
 
   const isRealPiAuth = piUser !== null && !piUser.fallbackMode && Boolean(piUser.accessToken)
   const selectedLabel = selected === null ? '—' : getTileSymbol(board[selected])
-  const nextRewardPreview = useMemo(() => `${3 * 3 * 10 * combo}+`, [combo])
+  const nextRewardPreview = useMemo(() => `${3 * 3 * 10}+`, [])
   const isCriticalTimer = playing && timeLeft <= 10
   const isHotCombo = combo >= 5
 
@@ -196,7 +200,7 @@ export function PiTilesGame() {
     setIsRefilling(false)
     setIsAnimatingResolution(false)
     setScore(0)
-    setCombo(1)
+    setCombo(0)
     setTimeLeft(ROUND_SECONDS)
     setPlaying(true)
     setSubmitted(false)
@@ -297,19 +301,18 @@ export function PiTilesGame() {
     setSelected(null)
 
     if (previewMatches.length === 0) {
-      setCombo(1)
       setLastMatches([])
       setFallDistances([])
       setIsRefilling(false)
       setIsAnimatingResolution(false)
       setComboCallout(null)
-      setSecurityNote('No-match swap: combo reset.')
+      setSecurityNote('No-match swap: combo count unchanged.')
       setMessage('No match found.')
       return
     }
 
     let currentBoard = swapped
-    let currentCombo = combo
+    let cascadeMultiplier = 1
     let totalGained = 0
     let totalMatched = 0
     let cascadeCount = 0
@@ -320,7 +323,7 @@ export function PiTilesGame() {
     setBoard(swapped)
 
     for (let stepIndex = 0; stepIndex < MAX_VISIBLE_CASCADES; stepIndex += 1) {
-      const step = resolveOneStep(currentBoard, currentCombo)
+      const step = resolveOneStep(currentBoard, cascadeMultiplier)
 
       if (!step.hasMatches) {
         if (step.wasReshuffled) {
@@ -347,7 +350,7 @@ export function PiTilesGame() {
       setLastMatches(step.matches)
       setFallDistances([])
       setIsRefilling(false)
-      setCombo(step.combo)
+      setCombo((currentCombo) => currentCombo + 1)
       setScore((currentScore) => currentScore + step.gained)
       setComboBurst((burst) => burst + 1)
 
@@ -383,14 +386,13 @@ export function PiTilesGame() {
       setIsRefilling(false)
 
       currentBoard = step.board
-      currentCombo = step.combo
+      cascadeMultiplier = step.combo
     }
 
     if (cascadeCount >= MAX_VISIBLE_CASCADES && findMatches(currentBoard).length > 0) {
       cascadeLimitReached = true
       reshuffled = true
       currentBoard = makeBoard()
-      currentCombo = 1
       setLastMatches([])
       setFallDistances([])
       setIsRefilling(false)
@@ -398,7 +400,6 @@ export function PiTilesGame() {
     }
 
     setValidMoves((currentMoves) => currentMoves + 1)
-    setCombo(currentCombo)
     setBoard(currentBoard)
     setIsAnimatingResolution(false)
 
@@ -582,6 +583,7 @@ export function PiTilesGame() {
                 const swapped = lastSwap.includes(index)
                 const matched = lastMatches.includes(index)
                 const fallDistance = fallDistances[index] || 0
+                const tilePower = getTilePower(tile)
 
                 return (
                   <button
@@ -591,8 +593,10 @@ export function PiTilesGame() {
                     style={{ '--fall-y': `${-fallDistance * TILE_SIZE_PX}px` } as CSSProperties}
                     className={`tile ${SYMBOL_STYLES[symbol]} ${active ? 'is-active' : ''} ${swapped ? 'is-swapped' : ''} ${
                       matched ? 'is-matched' : ''
-                    } ${matched && lastMatches.length >= 8 ? 'is-area-blast' : ''} ${fallDistance > 0 ? 'is-falling' : ''}`}
-                    aria-label={`Tile ${symbol} ${index + 1}`}
+                    } ${tilePower === 'pi-bomb' ? 'is-pi-bomb' : ''} ${
+                      matched && lastMatches.length >= 8 ? 'is-area-blast' : ''
+                    } ${fallDistance > 0 ? 'is-falling' : ''}`}
+                    aria-label={`Tile ${symbol} ${index + 1}${tilePower === 'pi-bomb' ? ' Pi Bomb' : ''}`}
                   >
                     <span>{symbol}</span>
                   </button>
