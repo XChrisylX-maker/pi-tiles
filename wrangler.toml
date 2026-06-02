@@ -19,12 +19,6 @@ headers = [
   { for = "/*", values = { X-Frame-Options = "ALLOWALL" } }
 ]
 
-[[secrets_store_secrets]]
-binding = "PI_API_KEY"
-store_id = "718e22e76df5429d902853d6d9473603"
-secret_name = "PI_API_KEY"
-
-[[secrets_store_secrets]]
-binding = "PI_SERVER_API_KEY"
-store_id = "718e22e76df5429d902853d6d9473603"
-secret_name = "PI_SERVER_API_KEY"
+[[kv_namespaces]]
+binding = "LEADERBOARD"
+id = "11592418f95e4421bbc2d37bc9c910ec"

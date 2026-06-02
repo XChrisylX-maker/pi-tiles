@@ -15,15 +15,17 @@ import {
 import type { Board, ScorePayload } from '../game/gameEngine'
 import {
   calculateRewardPool,
+  fetchWeeklyLeaderboard,
   getVipRank,
+  LEADERBOARD_LIMIT,
   makeSeededLeaderboard,
   mergeLeaderboardEntry,
   rewardForVipRank,
   submitScoreToLeaderboard,
   VIP_PRICE_PI,
 } from '../api/leaderboardApi'
-import type { LeaderboardEntry } from '../api/leaderboardApi'
-import { authenticatePiUser, createMockPiUser, PI_INTEGRATION_STATUS, requestVipPayment } from '../pi/piClient'
+import type { LeaderboardEntry, RewardPool } from '../api/leaderboardApi'
+import { authenticatePiUser, checkVipPass, createMockPiUser, PI_INTEGRATION_STATUS, requestVipPayment } from '../pi/piClient'
 import type { PiUser } from '../pi/piClient'
 import { useAutoSubmit } from '../hooks/useAutoSubmit'
 import { useCountdown } from '../hooks/useCountdown'
@@ -50,9 +52,10 @@ const ICONS: Record<IconName, string> = {
 
 const COMBO_CALLOUTS = ['CHAIN', 'MEGA', 'ULTRA', 'BLAST', 'PI STORM'] as const
 const MATCH_FLASH_MS = 300
-const REFILL_ANIMATION_MS = 430
+const REFILL_ANIMATION_MS = 380
 const TILE_SIZE_PX = 58
-const MAX_VISIBLE_CASCADES = 3
+const MAX_VISIBLE_CASCADES = 10
+const MAX_CASCADE_STEPS = 64
 const SWIPE_THRESHOLD_PX = 22
 
 type TileDragStart = {
@@ -60,6 +63,7 @@ type TileDragStart = {
   pointerId: number
   x: number
   y: number
+  resolved: boolean
 }
 
 function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
@@ -82,6 +86,16 @@ function getTilePower(tile: Board[number]) {
   return typeof tile === 'string' ? undefined : tile.power
 }
 
+function getLeaderboardStatus(row: LeaderboardEntry, vipRank: number | null, reward: string) {
+  if (row.vip) {
+    return vipRank ? `VIP · rewards ranking #${vipRank} · ${reward}` : 'VIP · rewards ranking'
+  }
+
+  if (row.piUid.startsWith('guest-')) return 'Guest · no rewards'
+
+  return 'Pioneer · no rewards'
+}
+
 export function PiTilesGame() {
   const [piUser, setPiUser] = useState<PiUser | null>(null)
   const [isConnectingPi, setIsConnectingPi] = useState(false)
@@ -99,7 +113,9 @@ export function PiTilesGame() {
   const [best, setBest] = useState(0)
   const [playerName, setPlayerName] = useState('')
   const [isVip, setIsVip] = useState(false)
+  const [isOpeningVipPayment, setIsOpeningVipPayment] = useState(false)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(makeSeededLeaderboard)
+  const [leaderboardWeek, setLeaderboardWeek] = useState(currentWeekLabel())
   const [submitted, setSubmitted] = useState(false)
   const [gamesPlayed, setGamesPlayed] = useState(0)
   const [validMoves, setValidMoves] = useState(0)
@@ -118,8 +134,9 @@ export function PiTilesGame() {
   const connectRequest = useRef<Promise<PiUser> | null>(null)
   const tileDragStart = useRef<TileDragStart | null>(null)
   const suppressNextTileClick = useRef(false)
-  const [vipMembers] = useState(247)
-  const { weeklyPool } = useMemo(() => calculateRewardPool(vipMembers), [vipMembers])
+  const submitInFlight = useRef(false)
+  const [rewardPool, setRewardPool] = useState<RewardPool>(() => calculateRewardPool(0))
+  const { vipMembers, weeklyPool } = rewardPool
 
   const isRealPiAuth = piUser !== null && !piUser.fallbackMode && Boolean(piUser.accessToken)
   const selectedLabel = selected === null ? '—' : getTileSymbol(board[selected])
@@ -199,6 +216,64 @@ export function PiTilesGame() {
 
   useEffect(() => clearAnimationTimers, [clearAnimationTimers])
 
+  useEffect(() => {
+    if (!piUser?.accessToken || piUser.fallbackMode) return
+
+    let cancelled = false
+
+    async function loadVipStatus() {
+      try {
+        const status = await checkVipPass(piUser!.accessToken)
+
+        if (cancelled) return
+
+        setIsVip(Boolean(status.active))
+
+        if (status.active) {
+          setSecurityNote('VIP Pass restored from server.')
+        }
+      } catch (error) {
+        console.warn('[PiTiles] VIP status check failed:', error)
+      }
+    }
+
+    void loadVipStatus()
+
+    return () => {
+      cancelled = true
+    }
+  }, [piUser])
+
+  useEffect(() => {
+    if (playing) return
+
+    let cancelled = false
+
+    async function loadLeaderboard() {
+      try {
+        const weeklyLeaderboard = await fetchWeeklyLeaderboard()
+
+        if (cancelled) return
+
+        setLeaderboard(weeklyLeaderboard.entries)
+        setLeaderboardWeek(weeklyLeaderboard.week)
+        setRewardPool(weeklyLeaderboard.rewards)
+      } catch (error) {
+        console.warn('[PiTiles] leaderboard fetch failed:', error)
+      }
+    }
+
+    void loadLeaderboard()
+    const timer = window.setInterval(() => {
+      void loadLeaderboard()
+    }, 30000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [playing])
+
   const start = useCallback(() => {
     clearAnimationTimers()
     playStartSound()
@@ -215,6 +290,7 @@ export function PiTilesGame() {
     setTimeLeft(ROUND_SECONDS)
     setPlaying(true)
     setSubmitted(false)
+    submitInFlight.current = false
     setValidMoves(0)
     setLastPayload(null)
     setComboBurst(0)
@@ -225,15 +301,18 @@ export function PiTilesGame() {
 
   const submitScore = useCallback(
     async (finalScore = score, auto = false) => {
-      if (submitted || finalScore <= 0) return
+      if (submitted || submitInFlight.current || finalScore <= 0) return
+      submitInFlight.current = true
 
       if (playing && !auto) {
         setSecurityNote('Submit blocked: finish the game first.')
+        submitInFlight.current = false
         return
       }
 
       if (validMoves < MIN_VALID_MOVES) {
         setSecurityNote('Submit blocked: not enough activity for a valid game.')
+        submitInFlight.current = false
         return
       }
 
@@ -255,16 +334,20 @@ export function PiTilesGame() {
         currentRows: leaderboard,
         isVip,
         board,
+        accessToken: safePiUser.accessToken || undefined,
       })
 
       if (!result.accepted || !result.entry) {
         setSecurityNote(result.reason || 'Score rejected by anti-cheat checks.')
+        submitInFlight.current = false
         return
       }
 
       playSuccessSound()
       setLastPayload(payload)
-      setLeaderboard((rows) => mergeLeaderboardEntry(rows, result.entry!))
+      setLeaderboard(result.leaderboard?.entries || ((rows) => mergeLeaderboardEntry(rows, result.entry!)))
+      setLeaderboardWeek(result.leaderboard?.week || payload.week)
+      if (result.leaderboard?.rewards) setRewardPool(result.leaderboard.rewards)
       setSubmitted(true)
       setGamesPlayed((currentGames) => currentGames + 1)
       setSecurityNote(auto ? 'Score auto-submitted at game end.' : 'Score accepted: leaderboard updated.')
@@ -328,12 +411,11 @@ export function PiTilesGame() {
     let totalMatched = 0
     let cascadeCount = 0
     let reshuffled = false
-    let cascadeLimitReached = false
 
     setIsAnimatingResolution(true)
     setBoard(swapped)
 
-    for (let stepIndex = 0; stepIndex < MAX_VISIBLE_CASCADES; stepIndex += 1) {
+    for (let stepIndex = 0; stepIndex < MAX_CASCADE_STEPS; stepIndex += 1) {
       const step = resolveOneStep(currentBoard, cascadeMultiplier)
 
       if (!step.hasMatches) {
@@ -352,79 +434,76 @@ export function PiTilesGame() {
       totalMatched += step.matched
       reshuffled = reshuffled || step.wasReshuffled
 
+      const isVisibleCascade = stepIndex < MAX_VISIBLE_CASCADES
+
       playMatchSound()
 
       if (step.combo >= 5 || step.matched >= 8) {
         playComboSound()
       }
 
-      setLastMatches(step.matches)
-      setFallDistances([])
-      setIsRefilling(false)
+      if (isVisibleCascade) {
+        setLastMatches(step.matches)
+        setFallDistances([])
+        setIsRefilling(false)
+      }
+
       setCombo((currentCombo) => currentCombo + 1)
       setScore((currentScore) => currentScore + step.gained)
       setComboBurst((burst) => burst + 1)
 
-      if (step.combo >= 5 || step.matched >= 8) {
+      if (isVisibleCascade && (step.combo >= 5 || step.matched >= 8)) {
         const calloutIndex = (step.gained + step.matched + cascadeCount + validMoves) % COMBO_CALLOUTS.length
         setComboCallout(COMBO_CALLOUTS[calloutIndex])
-      } else {
+      } else if (isVisibleCascade) {
         setComboCallout(null)
       }
 
-      if (step.matched >= 8) {
-        setMessage(`${step.matched} tiles blasted · AREA BLAST · +${step.gained}`)
+      if (isVisibleCascade) {
+        if (step.matched >= 8) {
+          setMessage(`${step.matched} tiles blasted · AREA BLAST · +${step.gained}`)
+        } else {
+          setMessage(`${step.matched} tiles blasted · cascade ${cascadeCount} · +${step.gained}`)
+        }
+
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, MATCH_FLASH_MS)
+          animationTimers.current.push(timer)
+        })
+
+        setLastMatches([])
+        setFallDistances(step.fallDistances)
+        setIsRefilling(true)
+        setBoard(step.board)
+
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, REFILL_ANIMATION_MS)
+          animationTimers.current.push(timer)
+        })
+
+        setFallDistances([])
+        setIsRefilling(false)
       } else {
-        setMessage(`${step.matched} tiles blasted · cascade ${cascadeCount} · +${step.gained}`)
+        setBoard(step.board)
       }
-
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, MATCH_FLASH_MS)
-        animationTimers.current.push(timer)
-      })
-
-      setLastMatches([])
-      setFallDistances(step.fallDistances)
-      setIsRefilling(true)
-      setBoard(step.board)
-
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, REFILL_ANIMATION_MS)
-        animationTimers.current.push(timer)
-      })
-
-      setFallDistances([])
-      setIsRefilling(false)
 
       currentBoard = step.board
       cascadeMultiplier = step.combo
-    }
-
-    if (cascadeCount >= MAX_VISIBLE_CASCADES && findMatches(currentBoard).length > 0) {
-      cascadeLimitReached = true
-      reshuffled = true
-      currentBoard = makeBoard()
-      setLastMatches([])
-      setFallDistances([])
-      setIsRefilling(false)
-      setBoard(currentBoard)
     }
 
     setValidMoves((currentMoves) => currentMoves + 1)
     setBoard(currentBoard)
     setIsAnimatingResolution(false)
 
-    if (cascadeLimitReached) {
-      setSecurityNote('Long cascade safely stabilized to keep the round playable.')
+    if (findMatches(currentBoard).length > 0) {
+      setSecurityNote('Long cascade paused without reshuffling; make another match to continue.')
     } else if (reshuffled) {
       setSecurityNote('No moves left: board reshuffled automatically after cascades.')
     } else {
       setSecurityNote('Matches validated: cascades resolved step by step.')
     }
 
-    if (cascadeLimitReached) {
-      setMessage(`${totalMatched} tiles blasted · cascade stabilized · +${totalGained} points`)
-    } else if (cascadeCount > 1) {
+    if (cascadeCount > 1) {
       setMessage(`${totalMatched} tiles blasted · ${cascadeCount} cascades · +${totalGained} points`)
     } else {
       setMessage(`${totalMatched} tiles blasted · +${totalGained} points`)
@@ -459,12 +538,48 @@ export function PiTilesGame() {
       pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
+      resolved: false,
     }
     suppressNextTileClick.current = false
     event.currentTarget.setPointerCapture(event.pointerId)
   }
 
+  function resolveTileSwipe(event: PointerEvent<HTMLButtonElement>) {
+    const dragStart = tileDragStart.current
+
+    if (!dragStart || dragStart.pointerId !== event.pointerId) return
+    if (!playing || isAnimatingResolution || dragStart.resolved) return
+
+    const deltaX = event.clientX - dragStart.x
+    const deltaY = event.clientY - dragStart.y
+    const distance = Math.max(Math.abs(deltaX), Math.abs(deltaY))
+    const target = getSwipeTarget(dragStart.index, deltaX, deltaY)
+
+    if (distance >= SWIPE_THRESHOLD_PX) {
+      suppressNextTileClick.current = true
+    }
+
+    if (target === null || !areNeighbors(dragStart.index, target)) return
+
+    dragStart.resolved = true
+    tileDragStart.current = null
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+
+    setSelected(null)
+    playSwapSound()
+    void resolveSwap(dragStart.index, target)
+  }
+
+  function handleTilePointerMove(event: PointerEvent<HTMLButtonElement>) {
+    resolveTileSwipe(event)
+  }
+
   function handleTilePointerUp(event: PointerEvent<HTMLButtonElement>) {
+    resolveTileSwipe(event)
+
     const dragStart = tileDragStart.current
 
     if (!dragStart || dragStart.pointerId !== event.pointerId) return
@@ -474,22 +589,6 @@ export function PiTilesGame() {
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId)
     }
-
-    if (!playing || isAnimatingResolution) return
-
-    const deltaX = event.clientX - dragStart.x
-    const deltaY = event.clientY - dragStart.y
-    const target = getSwipeTarget(dragStart.index, deltaX, deltaY)
-
-    if (Math.max(Math.abs(deltaX), Math.abs(deltaY)) >= SWIPE_THRESHOLD_PX) {
-      suppressNextTileClick.current = true
-    }
-
-    if (target === null || !areNeighbors(dragStart.index, target)) return
-
-    setSelected(null)
-    playSwapSound()
-    void resolveSwap(dragStart.index, target)
   }
 
   function handleTilePointerCancel(event: PointerEvent<HTMLButtonElement>) {
@@ -538,13 +637,9 @@ export function PiTilesGame() {
     void resolveSwap(selected, index)
   }
 
-  function rerollLeaderboard() {
-    setLeaderboard(makeSeededLeaderboard())
-    setSubmitted(false)
-    setSecurityNote('Leaderboard refreshed.')
-  }
-
   async function handleVipPayment() {
+    if (isOpeningVipPayment) return
+
     if (isVip) {
       setSecurityNote('VIP Pass is already active.')
       setMessage('VIP Pass active.')
@@ -566,12 +661,27 @@ export function PiTilesGame() {
     }
 
     setSecurityNote('Opening Pi payment…')
+    setIsOpeningVipPayment(true)
 
-    const result = await requestVipPayment()
+    const result = await requestVipPayment({
+      onStatus(status) {
+        setSecurityNote(status)
+        setMessage(status)
+      },
+    })
+    setIsOpeningVipPayment(false)
 
     if (result.paid) {
       setIsVip(true)
-      setSecurityNote('VIP activated successfully.')
+      try {
+        const weeklyLeaderboard = await fetchWeeklyLeaderboard()
+        setLeaderboard(weeklyLeaderboard.entries)
+        setLeaderboardWeek(weeklyLeaderboard.week)
+        setRewardPool(weeklyLeaderboard.rewards)
+      } catch (error) {
+        console.warn('[PiTiles] leaderboard refresh after VIP payment failed:', error)
+      }
+      setSecurityNote(result.vipExpiresAt ? `VIP activated until ${new Date(result.vipExpiresAt).toLocaleDateString()}.` : 'VIP activated successfully.')
       setMessage('VIP Pass activated.')
       return
     }
@@ -583,7 +693,7 @@ export function PiTilesGame() {
     }
 
     setSecurityNote(result.error || 'VIP payment failed.')
-    setMessage('VIP payment failed.')
+    setMessage(result.error || 'VIP payment failed.')
   }
 
   return (
@@ -683,12 +793,13 @@ export function PiTilesGame() {
                     key={getTileId(tile, index)}
                     type="button"
                     onPointerDown={(event) => handleTilePointerDown(event, index)}
+                    onPointerMove={handleTilePointerMove}
                     onPointerUp={handleTilePointerUp}
                     onPointerCancel={handleTilePointerCancel}
                     onClick={() => handleTileClick(index)}
                     style={{ '--fall-y': `${-fallDistance * TILE_SIZE_PX}px` } as CSSProperties}
                     className={`tile ${SYMBOL_STYLES[symbol]} ${active ? 'is-active' : ''} ${swapped ? 'is-swapped' : ''} ${
-                      matched ? 'is-matched' : ''
+                      matched && lastMatches.length < 8 ? 'is-matched' : ''
                     } ${tilePower === 'pi-bomb' ? 'is-pi-bomb' : ''} ${
                       matched && lastMatches.length >= 8 ? 'is-area-blast' : ''
                     } ${fallDistance > 0 ? 'is-falling' : ''}`}
@@ -724,8 +835,13 @@ export function PiTilesGame() {
               {playing ? 'Restart' : 'Start Game'}
             </button>
 
-            <button type="button" onClick={() => void handleVipPayment()} className="secondary-button">
-              {isVip ? 'VIP Active' : 'VIP'}
+            <button
+              type="button"
+              onClick={() => void handleVipPayment()}
+              className="secondary-button"
+              disabled={isOpeningVipPayment}
+            >
+              {isOpeningVipPayment ? 'Opening...' : isVip ? 'VIP Active' : 'VIP'}
             </button>
           </div>
 
@@ -783,12 +899,9 @@ export function PiTilesGame() {
             <div className="leaderboard-head">
               <div>
                 <h2>Global Leaderboard • VIP Circuit</h2>
-                <p>{currentWeekLabel()}</p>
+                <p>{leaderboardWeek}</p>
               </div>
 
-              <button type="button" onClick={rerollLeaderboard} className="ghost-button">
-                Refresh
-              </button>
             </div>
 
             <div className="submit-row">
@@ -798,16 +911,15 @@ export function PiTilesGame() {
                 placeholder="Pioneer Name"
                 aria-label="Pioneer Name"
               />
-
-              <button type="button" onClick={() => void submitScore()} disabled={submitted || score <= 0} className="submit-button">
-                Submit
-              </button>
             </div>
 
             <div className="leaderboard-list">
               {leaderboard.map((row, index) => {
+                const rank = row.rank || index + 1
                 const vipRank = getVipRank(leaderboard, row)
-                const reward = rewardForVipRank(vipRank, weeklyPool)
+                const reward = row.reward || rewardForVipRank(vipRank, weeklyPool)
+                const rewardLabel = row.vip ? reward : 'No rewards'
+                const status = getLeaderboardStatus(row, vipRank, reward)
 
                 return (
                   <div
@@ -815,21 +927,21 @@ export function PiTilesGame() {
                     className={`leaderboard-row ${row.isPlayer ? 'is-player' : ''} ${row.vip ? 'is-vip' : ''} ${index < 3 ? 'is-podium' : ''}`}
                   >
                     <div className="leaderboard-player">
-                      <div className={`rank rank-${index + 1}`}>#{index + 1}</div>
+                      <div className={`rank rank-${rank}`}>#{rank}</div>
 
                       <div className="player-copy">
                         <div className="player-name">
                           <span>{row.name}</span>
-                          {row.vip && <em>VIP #{vipRank}</em>}
+                          <em className={row.vip ? 'status-vip' : 'status-no-reward'}>{row.vip ? `VIP #${vipRank}` : 'No rewards'}</em>
                         </div>
 
-                        <small>{row.games} games played</small>
+                        <small>{status} · score #{row.games}</small>
                       </div>
                     </div>
 
                     <div className="leaderboard-score">
                       <strong>{row.score}</strong>
-                      <span className={row.vip && vipRank && vipRank <= 10 ? 'tone-emerald' : ''}>{reward}</span>
+                      <span className={row.vip && vipRank && vipRank <= LEADERBOARD_LIMIT ? 'tone-emerald' : ''}>{rewardLabel}</span>
                     </div>
                   </div>
                 )

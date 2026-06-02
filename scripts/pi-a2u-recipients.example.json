@@ -1,0 +1,12 @@
+[
+  {
+    "uid": "pi-user-uid-1",
+    "amount": 0.01,
+    "memo": "PlayPiTiles test payout 1"
+  },
+  {
+    "uid": "pi-user-uid-2",
+    "amount": 0.01,
+    "memo": "PlayPiTiles test payout 2"
+  }
+]

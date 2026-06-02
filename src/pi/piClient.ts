@@ -17,9 +17,19 @@ export type VipPaymentResult = {
   paid: boolean
   transactionId?: string
   paymentId?: string
+  vipExpiresAt?: string
   fallbackMode: boolean
   cancelled?: boolean
   error?: string
+}
+
+type VipPaymentOptions = {
+  onStatus?: (status: string) => void
+}
+
+type VipPass = {
+  active: boolean
+  expiresAt?: string
 }
 
 type PiAuthResult = {
@@ -69,10 +79,8 @@ declare global {
 }
 
 const PI_SDK_VERSION = '2.0'
-const PI_SANDBOX = true
 
 const VIP_PRICE_PI = 1
-const VIP_PASS_DAYS = 7
 
 const PI_SDK_INJECTION_ATTEMPTS = 50
 const PI_SDK_INJECTION_DELAY_MS = 200
@@ -82,6 +90,7 @@ const PI_AUTH_TIMEOUT_MS = 20000
 const PI_PAYMENT_SCOPE_TIMEOUT_MS = 20000
 const PI_BACKEND_TIMEOUT_MS = 20000
 const PI_PAYMENT_TIMEOUT_MS = 90000
+const PI_SANDBOX_ENV = String(import.meta.env.VITE_PI_SANDBOX ?? 'true').toLowerCase()
 
 let piSdkInitialized = false
 let piSdkInitPromise: Promise<boolean> | null = null
@@ -93,12 +102,25 @@ let currentPiUser: PiUser | null = null
 export const PI_INTEGRATION_STATUS: PiIntegrationStatus = {
   auth: 'sdk',
   payments: 'sdk',
-  leaderboard: 'local',
+  leaderboard: 'api',
   rewards: 'simulated',
 }
 
 export function isPiBrowser(): boolean {
   return typeof window !== 'undefined' && Boolean(window.Pi)
+}
+
+function shouldUsePiSandbox() {
+  if (typeof window === 'undefined') return PI_SANDBOX_ENV !== 'false'
+
+  const url = new URL(window.location.href)
+  const sandboxParam = url.searchParams.get('sandbox')
+
+  if (sandboxParam === 'true') return true
+  if (sandboxParam === 'false') return false
+  if (window.location.hostname === 'sandbox.minepi.com') return true
+
+  return !['false', '0', 'off', 'mainnet'].includes(PI_SANDBOX_ENV)
 }
 
 export function createMockPiUser(): PiUser {
@@ -189,7 +211,7 @@ export async function initPiSdk() {
         Promise.resolve(
           window.Pi.init({
             version: PI_SDK_VERSION,
-            sandbox: PI_SANDBOX,
+            sandbox: shouldUsePiSandbox(),
           }),
         ),
         PI_SDK_INIT_TIMEOUT_MS,
@@ -250,10 +272,16 @@ async function approvePayment(paymentId: string, identifier: string, accessToken
 }
 
 async function completePayment(paymentId: string, txid: string, identifier: string, accessToken: string) {
-  return postJson<{ completed?: boolean }>('/api/pi/payments/complete', {
+  return postJson<{ completed?: boolean; vipPass?: VipPass }>('/api/pi/payments/complete', {
     paymentId,
     txid,
     identifier,
+    accessToken,
+  })
+}
+
+export async function checkVipPass(accessToken: string) {
+  return postJson<{ active: boolean; vipPass?: VipPass; error?: string }>('/api/pi/vip/status', {
     accessToken,
   })
 }
@@ -300,17 +328,17 @@ export async function authenticatePiUser(): Promise<PiUser> {
     }
 
     try {
-      console.info('[Pi SDK] Opening username authentication.')
+      console.info('[Pi SDK] Opening Pi authentication.')
 
       const auth = await withTimeout(
-        window.Pi.authenticate(['username'], (incompletePayment) => {
+        window.Pi.authenticate(['username', 'wallet_address', 'payments'], (incompletePayment) => {
           void reportIncompletePayment(incompletePayment, currentPiUser?.accessToken)
         }),
         PI_AUTH_TIMEOUT_MS,
         'Pi authentication',
       )
 
-      console.info('[Pi SDK] Username scope authenticated:', auth)
+      console.info('[Pi SDK] Pi scopes authenticated:', auth)
 
       if (!auth.accessToken) {
         console.warn('[Pi SDK] No access token returned:', auth)
@@ -331,6 +359,7 @@ export async function authenticatePiUser(): Promise<PiUser> {
         isAuthenticated: true,
         fallbackMode: false,
       }
+      paymentScopeGranted = true
 
       return currentPiUser
     } catch (error) {
@@ -345,7 +374,8 @@ export async function authenticatePiUser(): Promise<PiUser> {
   return authenticatePromise
 }
 
-export async function requestVipPayment(): Promise<VipPaymentResult> {
+export async function requestVipPayment(options: VipPaymentOptions = {}): Promise<VipPaymentResult> {
+  options.onStatus?.('Checking Pi SDK...')
   const sdkInitialized = await initPiSdk()
 
   if (!sdkInitialized || !window.Pi?.createPayment) {
@@ -371,6 +401,7 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
   const paymentIdentifier = `playpitiles-vip-${Date.now()}`
 
   try {
+    options.onStatus?.('Requesting Pi payment permission...')
     await requestPaymentScope(accessToken)
   } catch (error) {
     console.error('[Pi SDK] Payment permission failed:', error)
@@ -401,14 +432,15 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
     }, PI_PAYMENT_TIMEOUT_MS)
 
     try {
+      options.onStatus?.('Opening Pi payment sheet...')
       window.Pi?.createPayment?.(
         {
           amount: VIP_PRICE_PI,
-          memo: `PlayPiTiles VIP Pass - ${VIP_PASS_DAYS} days`,
+          memo: 'PlayPiTiles VIP Pass - Weekly leaderboard',
           metadata: {
             app: 'playpitiles',
             feature: 'vip-pass',
-            durationDays: VIP_PASS_DAYS,
+            duration: 'current-week',
             identifier: paymentIdentifier,
             piUid: authenticatedUser.piUid,
             username: authenticatedUser.username,
@@ -419,6 +451,7 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
         {
           async onReadyForServerApproval(paymentId) {
             console.info('[Pi SDK] Ready for server approval:', paymentId)
+            options.onStatus?.('Approving payment on server...')
 
             try {
               await approvePayment(paymentId, paymentIdentifier, accessToken)
@@ -437,15 +470,17 @@ export async function requestVipPayment(): Promise<VipPaymentResult> {
 
           async onReadyForServerCompletion(paymentId, txid) {
             console.info('[Pi SDK] Ready for server completion:', paymentId, txid)
+            options.onStatus?.('Completing payment on server...')
 
             try {
-              await completePayment(paymentId, txid, paymentIdentifier, accessToken)
+              const completion = await completePayment(paymentId, txid, paymentIdentifier, accessToken)
               console.info('[Pi SDK] Payment completed by backend:', paymentId, txid)
 
               finish({
                 paid: true,
                 transactionId: txid,
                 paymentId,
+                vipExpiresAt: completion.vipPass?.expiresAt,
                 fallbackMode: false,
               })
             } catch (error) {

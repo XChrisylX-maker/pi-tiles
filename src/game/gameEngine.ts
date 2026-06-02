@@ -406,17 +406,16 @@ export function resolveOneStep(board: Board, combo = 1): ResolveStepResult {
   const gained = matches.length * matches.length * 10 * combo
   const refill = applyGravityRefill(boardWithCreatedBombs, removalMatches)
   const nextCombo = combo + 1
-  const playable = ensurePlayableBoard(refill.board)
 
   return {
-    board: playable.board,
+    board: refill.board,
     gained,
     matched: matches.length,
     matches,
     fallDistances: refill.fallDistances,
     combo: nextCombo,
     hasMatches: true,
-    wasReshuffled: playable.wasReshuffled,
+    wasReshuffled: false,
   }
 }
 

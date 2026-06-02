@@ -1,0 +1,27 @@
+[
+  {
+    "uid": "e82674ce-df9d-4ec8-8456-7ad3761de660",
+    "amount": 0.01,
+    "memo": "PlayPiTiles Testnet wallet validation 1"
+  },
+  {
+    "uid": "25ce6a57-c24f-4bdc-bed1-134be4f91a71",
+    "amount": 0.01,
+    "memo": "PlayPiTiles Testnet wallet validation 2"
+  },
+  {
+    "uid": "302c55b0-890a-4bfb-9261-cf1349ab187d",
+    "amount": 0.01,
+    "memo": "PlayPiTiles Testnet wallet validation 3"
+  },
+  {
+    "uid": "370bff43-b384-7c60-4c4e-af51-1b7ce10b1fcd",
+    "amount": 0.01,
+    "memo": "PlayPiTiles Testnet wallet validation 4"
+  },
+  {
+    "uid": "11000",
+    "amount": 0.01,
+    "memo": "PlayPiTiles Testnet wallet validation 5"
+  }
+]
