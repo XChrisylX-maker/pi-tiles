@@ -717,7 +717,7 @@ export function PiTilesGame() {
             <div>
               <div className="pi-eyebrow">
                 <Icon name="sparkles" tone="tone-amber" />
-                <span>Pi Network Arcade</span>
+                <span>The arcade Tiles Game</span>
               </div>
 
               <h1>Pi Tiles</h1>
