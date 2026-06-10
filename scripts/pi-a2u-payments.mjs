@@ -10,6 +10,7 @@ const DEFAULT_A2U_MEMO_PREFIX = process.env.PITILES_A2U_MEMO_PREFIX || 'PlayPiTi
 const DEFAULT_SYNC_INTERVAL_MS = Number(process.env.PITILES_SYNC_INTERVAL_MS || 60000)
 const DEFAULT_CREATE_LIMIT = Number(process.env.PITILES_A2U_LIMIT || 0)
 const DEFAULT_A2U_TARGET = Number(process.env.PITILES_A2U_TARGET || 10)
+const PI_UID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function printUsage() {
   console.log(`
@@ -21,6 +22,8 @@ Usage:
   PITILES_ADMIN_TOKEN=... node scripts/pi-a2u-payments.mjs complete <paymentId> <txid>
   PITILES_ADMIN_TOKEN=... node scripts/pi-a2u-payments.mjs incomplete
   PITILES_ADMIN_TOKEN=... node scripts/pi-a2u-payments.mjs users
+  PITILES_ADMIN_TOKEN=... node scripts/pi-a2u-payments.mjs pioneers
+  PITILES_ADMIN_TOKEN=... node scripts/pi-a2u-payments.mjs expire-vip <uid|username|--first-vip>
   PITILES_ADMIN_TOKEN=... node scripts/pi-a2u-payments.mjs add-users users.json
 
 Recipients file:
@@ -46,6 +49,7 @@ async function request(path, options = {}) {
     headers: {
       'Content-Type': 'application/json',
       Authorization: `Bearer ${ADMIN_TOKEN}`,
+      'X-PiTiles-Admin': ADMIN_TOKEN,
       ...(options.headers || {}),
     },
   })
@@ -57,6 +61,19 @@ async function request(path, options = {}) {
   }
 
   return payload
+}
+
+function getErrorPayload(error) {
+  const message = error instanceof Error ? error.message : String(error)
+  const jsonStart = message.indexOf('{')
+
+  if (jsonStart === -1) return null
+
+  try {
+    return JSON.parse(message.slice(jsonStart))
+  } catch {
+    return null
+  }
 }
 
 async function readJsonFile(filePath, fallback) {
@@ -81,6 +98,41 @@ function getRecipientsPath(filePath) {
 
 function getRecipientPaymentId(recipient) {
   return recipient.paymentId || recipient.payment?.id || recipient.payment?.payment?.identifier || ''
+}
+
+function getPiErrorCode(payload) {
+  return (
+    payload?.details?.error ||
+    payload?.details?.payment?.error ||
+    payload?.error ||
+    ''
+  )
+}
+
+function getPiErrorMessage(payload) {
+  return (
+    payload?.details?.error_message ||
+    payload?.details?.payment?.error_message ||
+    payload?.details?.message ||
+    payload?.error_message ||
+    payload?.error ||
+    ''
+  )
+}
+
+function isUnknownPiUserError(code, message) {
+  const normalizedCode = String(code || '').toLowerCase()
+  const normalizedMessage = String(message || '').toLowerCase()
+
+  return (
+    normalizedCode === 'user_not_found' ||
+    normalizedCode === 'recipient_not_found' ||
+    (normalizedMessage.includes('user with uid') && normalizedMessage.includes('not found'))
+  )
+}
+
+function isValidPiUid(uid) {
+  return PI_UID_PATTERN.test(String(uid || '').trim())
 }
 
 function getRecipientReference(recipient, index) {
@@ -134,7 +186,7 @@ async function createPayments(filePath, options = {}) {
     const normalizedRecipient = normalizeRecipient(recipient, index)
     const uid = normalizedRecipient.uid
 
-    if (!uid) throw new Error(`Recipient #${index + 1} is missing uid.`)
+    if (!isValidPiUid(uid)) throw new Error(`Recipient #${index + 1} has an invalid Pi uid: ${uid || 'missing'}`)
     if (seen.has(uid)) throw new Error(`Duplicate uid in recipients file: ${uid}`)
     seen.add(uid)
 
@@ -143,25 +195,74 @@ async function createPayments(filePath, options = {}) {
       continue
     }
 
+    if (options.onlyMissing && normalizedRecipient.paymentStatus === 'invalid_recipient') {
+      console.log(`#${index + 1} | invalid_recipient | uid=${uid} | skipped`)
+      continue
+    }
+
     if (options.limit && createdCount >= options.limit) {
       console.log(`#${index + 1} | pending | uid=${uid} | limit reached`)
       continue
     }
 
-    const result = await request('/api/pi/payments/app-to-user', {
-      method: 'POST',
-      body: JSON.stringify({
-        uid,
-        amount: normalizedRecipient.amount,
-        memo: normalizedRecipient.memo,
-        reference: normalizedRecipient.reference,
-        metadata: {
-          purpose: 'mainnet-wallet-validation',
-          position: index + 1,
-          ...(normalizedRecipient.username ? { username: normalizedRecipient.username } : {}),
-        },
-      }),
-    })
+    let result
+
+    try {
+      result = await request('/api/pi/payments/app-to-user', {
+        method: 'POST',
+        body: JSON.stringify({
+          uid,
+          amount: normalizedRecipient.amount,
+          memo: normalizedRecipient.memo,
+          reference: normalizedRecipient.reference,
+          metadata: {
+            purpose: 'mainnet-wallet-validation',
+            position: index + 1,
+            ...(normalizedRecipient.username ? { username: normalizedRecipient.username } : {}),
+          },
+        }),
+      })
+    } catch (error) {
+      const payload = getErrorPayload(error)
+      const piError = getPiErrorCode(payload)
+      const piErrorMessage = getPiErrorMessage(payload)
+
+      if (piError === 'ongoing_payment_found') {
+        recipients[index] = {
+          ...normalizedRecipient,
+          paymentStatus: 'needs_completion',
+          paymentError: piError,
+          paymentErrorMessage: piErrorMessage,
+          paymentUpdatedAt: new Date().toISOString(),
+        }
+
+        if (options.writeBack) {
+          await writeJsonFile(filePath, recipients)
+        }
+
+        console.log(`#${index + 1} | needs_completion | uid=${uid} | ${piErrorMessage || 'ongoing payment found'}`)
+        continue
+      }
+
+      if (isUnknownPiUserError(piError, piErrorMessage)) {
+        recipients[index] = {
+          ...normalizedRecipient,
+          paymentStatus: 'invalid_recipient',
+          paymentError: piError || 'user_not_found',
+          paymentErrorMessage: piErrorMessage || 'Pi user not found.',
+          paymentUpdatedAt: new Date().toISOString(),
+        }
+
+        if (options.writeBack) {
+          await writeJsonFile(filePath, recipients)
+        }
+
+        console.log(`#${index + 1} | invalid_recipient | uid=${uid} | ${piErrorMessage || 'Pi user not found'}`)
+        continue
+      }
+
+      throw error
+    }
 
     results.push(result)
     createdCount += 1
@@ -242,12 +343,67 @@ async function knownUsers() {
   }
 }
 
+async function pioneerUsers() {
+  const users = await fetchKnownUsers()
+  const pioneers = users.filter((user) => !user.vip && Number(user.scores || 0) > 0)
+
+  console.log(`Pioneers without VIP (${pioneers.length})`)
+  for (const user of pioneers.sort((a, b) => Number(b.bestScore || 0) - Number(a.bestScore || 0))) {
+    console.log(`${user.uid} | ${user.username || 'unknown'} | best=${user.bestScore || 0} | scores=${user.scores || 0}`)
+  }
+}
+
 async function fetchKnownUsers() {
   const result = await request('/api/admin/pi-users', {
     method: 'GET',
   })
 
   return Array.isArray(result.users) ? result.users : []
+}
+
+async function expireVipPass(identifier) {
+  if (!identifier) {
+    printUsage()
+    process.exitCode = 1
+    return
+  }
+
+  let piUid = identifier
+  let matchedUser = null
+
+  if (identifier === '--first-vip' || identifier.startsWith('@')) {
+    const users = await fetchKnownUsers()
+    const username = identifier.startsWith('@') ? identifier.slice(1).toLowerCase() : ''
+
+    matchedUser =
+      identifier === '--first-vip'
+        ? users.find((user) => user.vip)
+        : users.find((user) => String(user.username || '').toLowerCase() === username)
+
+    if (!matchedUser) {
+      throw new Error(identifier === '--first-vip' ? 'No active VIP user found.' : `No known user found for ${identifier}.`)
+    }
+
+    piUid = matchedUser.uid
+  }
+
+  const result = await request('/api/admin/vip-pass/expire', {
+    method: 'POST',
+    body: JSON.stringify({ piUid }),
+  })
+
+  console.log(
+    [
+      result.expired ? 'VIP expired' : 'VIP expiration failed',
+      `uid=${result.piUid || piUid}`,
+      result.username ? `username=${result.username}` : matchedUser?.username ? `username=${matchedUser.username}` : '',
+      `hadActivePass=${Boolean(result.hadActivePass)}`,
+      result.repairedStats ? 'stats=repaired' : '',
+    ]
+      .filter(Boolean)
+      .join(' | '),
+  )
+  console.log(JSON.stringify(result, null, 2))
 }
 
 async function syncKnownRecipients(filePath) {
@@ -260,12 +416,17 @@ async function syncKnownRecipients(filePath) {
 
   const users = await fetchKnownUsers()
   const recipientsByUid = new Map(recipients.map((recipient) => [String(recipient.uid || '').trim(), recipient]))
+  const syncedRecipients = []
   let addedCount = 0
   let updatedCount = 0
+  let ignoredCount = 0
 
   for (const user of users) {
     const uid = String(user.uid || '').trim()
-    if (!uid) continue
+    if (!isValidPiUid(uid)) {
+      ignoredCount += 1
+      continue
+    }
 
     const existing = recipientsByUid.get(uid)
     if (existing) {
@@ -273,10 +434,11 @@ async function syncKnownRecipients(filePath) {
         existing.username = user.username
         updatedCount += 1
       }
+      syncedRecipients.push(existing)
       continue
     }
 
-    const position = recipients.length + 1
+    const position = syncedRecipients.length + 1
     const nextRecipient = {
       uid,
       username: user.username || '',
@@ -286,18 +448,19 @@ async function syncKnownRecipients(filePath) {
       discoveredAt: new Date().toISOString(),
     }
 
-    recipients.push(nextRecipient)
-    recipientsByUid.set(uid, nextRecipient)
+    syncedRecipients.push(nextRecipient)
     addedCount += 1
   }
 
-  await writeJsonFile(resolvedPath, recipients)
+  await writeJsonFile(resolvedPath, syncedRecipients)
   console.log(`Recipients synced: ${resolvedPath}`)
-  console.log(`Known users fetched: ${users.length} | added=${addedCount} | username updates=${updatedCount}`)
+  console.log(
+    `Known users fetched: ${users.length} | valid=${syncedRecipients.length} | added=${addedCount} | username updates=${updatedCount} | ignored=${ignoredCount}`,
+  )
 
   return {
     filePath: resolvedPath,
-    recipients,
+    recipients: syncedRecipients,
     addedCount,
     updatedCount,
   }
@@ -322,23 +485,35 @@ async function autoCreateTargetPayments(filePath) {
 
   while (true) {
     const { recipients } = await syncKnownRecipients(resolvedPath)
-    const validRecipients = recipients.filter((recipient) => String(recipient.uid || '').trim())
+    const confirmedBefore = recipients.filter((recipient) => getRecipientPaymentId(recipient)).length
+    const remaining = Math.max(0, target - confirmedBefore)
 
-    if (validRecipients.length >= target) {
-      console.log(`Target reached: ${validRecipients.length}/${target} known users.`)
+    console.log(`Confirmed A2U payment records: ${confirmedBefore}/${target}.`)
+
+    if (remaining > 0) {
       await createPayments(resolvedPath, {
-        maxRecipients: target,
+        limit: remaining,
         onlyMissing: true,
         writeBack: true,
       })
-      console.log(`\nCreated or confirmed App-to-User payments for the first ${target} users.`)
+    }
+
+    const updatedRecipients = await readJsonFile(resolvedPath, [])
+    const confirmedAfter = updatedRecipients.filter((recipient) => getRecipientPaymentId(recipient)).length
+
+    if (confirmedAfter >= target) {
+      console.log(`\nTarget reached: ${confirmedAfter}/${target} App-to-User payments created or confirmed.`)
       console.log('Next: submit incomplete server payments with:')
       console.log('  node scripts/pi-a2u-submit-incomplete.mjs --dry-run')
       console.log('  node scripts/pi-a2u-submit-incomplete.mjs')
       return
     }
 
-    console.log(`Waiting for known users: ${validRecipients.length}/${target}. Next check in ${DEFAULT_SYNC_INTERVAL_MS}ms.`)
+    const invalidCount = updatedRecipients.filter((recipient) => recipient.paymentStatus === 'invalid_recipient').length
+    console.log(
+      `Waiting for eligible Pi users: ${confirmedAfter}/${target} payments ready; ${invalidCount} rejected UID(s). ` +
+        `Next check in ${DEFAULT_SYNC_INTERVAL_MS}ms.`,
+    )
     await new Promise((resolve) => setTimeout(resolve, DEFAULT_SYNC_INTERVAL_MS))
   }
 }
@@ -389,6 +564,8 @@ async function main() {
   if (command === 'complete') return completePayment(args[0], args[1])
   if (command === 'incomplete') return incompletePayments()
   if (command === 'users') return knownUsers()
+  if (command === 'pioneers') return pioneerUsers()
+  if (command === 'expire-vip') return expireVipPass(args[0])
   if (command === 'add-users') return addUsers(args[0])
 
   printUsage()

@@ -5,5 +5,8 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), cloudflare()],
+  plugins: [
+    react(),
+    ...(process.env.VITE_CLIENT_ONLY === '1' ? [] : [cloudflare()]),
+  ],
 })

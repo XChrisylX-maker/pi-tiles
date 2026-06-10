@@ -2,7 +2,10 @@ export const BOARD_SIZE = 5
 export const ROUND_SECONDS = 60
 export const MAX_CASCADE_STEPS = 4
 export const MIN_VALID_MOVES = 2
-export const ANTI_CHEAT_VERSION = 'placeholder-v1'
+export const ANTI_CHEAT_VERSION = 'pi-bonus-v1'
+export const BASE_MATCH_SCORE = 10
+export const PI_MATCH_BONUS_SCORE = 20
+export const PI_BOMB_CREATION_BONUS = 500
 
 export const SYMBOLS = ['π', '✦', '⬢', '◈', '⬡'] as const
 
@@ -34,14 +37,23 @@ export type ResolveStepResult = {
   matched: number
   matches: number[]
   fallDistances: number[]
+  newTileIndexes: number[]
   combo: number
   hasMatches: boolean
   wasReshuffled: boolean
+  piBonus: number
+  piMatchBonus: number
+  piBombCreationBonus: number
+  piMatched: number
+  piBombsCreated: number
+  piBombCreatedIndexes: number[]
+  piBombExplodedIndexes: number[]
 }
 
 export type GravityRefillResult = {
   board: Board
   fallDistances: number[]
+  newTileIndexes: number[]
 }
 
 export type ScorePlayer = {
@@ -261,6 +273,44 @@ function findCreatedPiBombIndexes(board: Board, runs: RunMatch[]): Set<number> {
   return created
 }
 
+function findTriggeredPiBombIndexes(board: Board, runs: RunMatch[]): Set<number> {
+  const triggered = new Set<number>()
+
+  runs.forEach((run) => {
+    run.indexes.forEach((index) => {
+      if (board[index].power === 'pi-bomb') {
+        triggered.add(index)
+      }
+    })
+  })
+
+  return triggered
+}
+
+function calculateMatchScore(board: Board, matches: number[], runs: RunMatch[], combo: number, createdPiBombs: Set<number>) {
+  const baseScore = matches.length * matches.length * BASE_MATCH_SCORE * combo
+  let piMatched = 0
+  let piMatchBonus = 0
+
+  runs.forEach((run) => {
+    if (board[run.indexes[0]].symbol !== 'π') return
+
+    piMatched += run.length
+    piMatchBonus += run.length * run.length * PI_MATCH_BONUS_SCORE * combo
+  })
+
+  const piBombCreationBonus = createdPiBombs.size * PI_BOMB_CREATION_BONUS * combo
+  const piBonus = piMatchBonus + piBombCreationBonus
+
+  return {
+    score: baseScore + piBonus,
+    piBonus,
+    piMatchBonus,
+    piBombCreationBonus,
+    piMatched,
+  }
+}
+
 export function hasValidMoves(board: Board): boolean {
   if (findMatchRuns(board).length > 0) return true
 
@@ -335,6 +385,7 @@ export function ensurePlayableBoard(board: Board, maxAttempts = 80): { board: Bo
 export function applyGravityRefill(board: Board, matches: number[]): GravityRefillResult {
   const next = [...board]
   const fallDistances = Array.from({ length: BOARD_SIZE * BOARD_SIZE }, () => 0)
+  const newTileIndexes: number[] = []
   const matched = new Set(matches)
 
   for (let col = 0; col < BOARD_SIZE; col += 1) {
@@ -367,16 +418,18 @@ export function applyGravityRefill(board: Board, matches: number[]): GravityRefi
       next[index] = cell.tile
 
       fallDistances[index] = Math.max(0, row - cell.row)
+      if (cell.isNew) newTileIndexes.push(index)
     }
   }
 
-  return { board: next, fallDistances }
+  return { board: next, fallDistances, newTileIndexes }
 }
 
 
 export function resolveOneStep(board: Board, combo = 1): ResolveStepResult {
   const runs = findMatchRuns(board)
   const createdPiBombs = findCreatedPiBombIndexes(board, runs)
+  const triggeredPiBombs = findTriggeredPiBombIndexes(board, runs)
   const matches = findMatches(board)
 
   if (matches.length === 0) {
@@ -388,9 +441,17 @@ export function resolveOneStep(board: Board, combo = 1): ResolveStepResult {
       matched: 0,
       matches: [],
       fallDistances: Array.from({ length: BOARD_SIZE * BOARD_SIZE }, () => 0),
+      newTileIndexes: [],
       combo,
       hasMatches: false,
       wasReshuffled: playable.wasReshuffled,
+      piBonus: 0,
+      piMatchBonus: 0,
+      piBombCreationBonus: 0,
+      piMatched: 0,
+      piBombsCreated: 0,
+      piBombCreatedIndexes: [],
+      piBombExplodedIndexes: [],
     }
   }
 
@@ -403,19 +464,27 @@ export function resolveOneStep(board: Board, combo = 1): ResolveStepResult {
         }
       : tile,
   )
-  const gained = matches.length * matches.length * 10 * combo
+  const score = calculateMatchScore(board, matches, runs, combo, createdPiBombs)
   const refill = applyGravityRefill(boardWithCreatedBombs, removalMatches)
   const nextCombo = combo + 1
 
   return {
     board: refill.board,
-    gained,
+    gained: score.score,
     matched: matches.length,
     matches,
     fallDistances: refill.fallDistances,
+    newTileIndexes: refill.newTileIndexes,
     combo: nextCombo,
     hasMatches: true,
     wasReshuffled: false,
+    piBonus: score.piBonus,
+    piMatchBonus: score.piMatchBonus,
+    piBombCreationBonus: score.piBombCreationBonus,
+    piMatched: score.piMatched,
+    piBombsCreated: createdPiBombs.size,
+    piBombCreatedIndexes: Array.from(createdPiBombs),
+    piBombExplodedIndexes: Array.from(triggeredPiBombs),
   }
 }
 
@@ -429,10 +498,12 @@ export function resolveBoard(board: Board, startingCombo = 1): ResolveBoardResul
   let lastFallDistances = Array.from({ length: BOARD_SIZE * BOARD_SIZE }, () => 0)
 
   for (let step = 0; step < MAX_CASCADE_STEPS; step += 1) {
+    const runs = findMatchRuns(current)
+    const createdPiBombs = findCreatedPiBombIndexes(current, runs)
     const matches = findMatches(current)
     if (matches.length === 0) break
 
-    const gained = matches.length * matches.length * 10 * nextCombo
+    const gained = calculateMatchScore(current, matches, runs, nextCombo, createdPiBombs).score
     totalGained += gained
     totalMatched += matches.length
     cascadeCount += 1

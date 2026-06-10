@@ -18,6 +18,14 @@ Preview images:
 - JPEG baseline
 - Under 1 MB each
 
+Public URLs after deployment:
+
+- `https://play-pi-tiles.com/pi-store-assets/pitiles-intro-400.jpg`
+- `https://play-pi-tiles.com/pi-store-assets/pitiles-preview-1.jpg`
+- `https://play-pi-tiles.com/pi-store-assets/pitiles-preview-2.jpg`
+- `https://play-pi-tiles.com/pi-store-assets/pitiles-preview-3.jpg`
+- `https://play-pi-tiles.com/pi-store-assets/listing.json`
+
 ## App Store Text
 
 App name:

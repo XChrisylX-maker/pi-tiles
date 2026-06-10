@@ -38,6 +38,8 @@ import {
   playSwapSound,
   playTapSound,
 } from '../audio/audioEngine'
+import { AndroidAdSlot } from '../android/AndroidAdSlot'
+import { AndroidPiBridge } from '../android/AndroidPiBridge'
 
 type IconName = 'sparkles' | 'shield' | 'zap' | 'crown' | 'server' | 'wallet'
 
@@ -51,12 +53,16 @@ const ICONS: Record<IconName, string> = {
 }
 
 const COMBO_CALLOUTS = ['CHAIN', 'MEGA', 'ULTRA', 'BLAST', 'PI STORM'] as const
-const MATCH_FLASH_MS = 300
-const REFILL_ANIMATION_MS = 380
+const MATCH_FLASH_MS = 145
+const REFILL_ANIMATION_MS = 310
+const INVALID_SWAP_PREVIEW_MS = 65
+const INVALID_SWAP_REWIND_MS = 105
 const TILE_SIZE_PX = 58
 const MAX_VISIBLE_CASCADES = 10
 const MAX_CASCADE_STEPS = 64
-const SWIPE_THRESHOLD_PX = 22
+const SWIPE_THRESHOLD_PX = 14
+const PI_CONNECT_UI_TIMEOUT_MS = 12000
+const SHOW_PI_DEBUG_PANEL = import.meta.env.DEV
 
 type TileDragStart = {
   index: number
@@ -64,6 +70,13 @@ type TileDragStart = {
   x: number
   y: number
   resolved: boolean
+}
+
+type BonusBurst = {
+  id: number
+  index: number
+  label: string
+  kind: 'pi-bonus' | 'pi-bomb' | 'pi-boom'
 }
 
 function Icon({ name, tone = '' }: { name: IconName; tone?: string }) {
@@ -86,6 +99,47 @@ function getTilePower(tile: Board[number]) {
   return typeof tile === 'string' ? undefined : tile.power
 }
 
+function formatBonusBubble(score: number) {
+  return `+${score} !!!`
+}
+
+function withUiTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null
+
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timeout`))
+    }, ms)
+  })
+
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
+function getBonusBurstPosition(index: number) {
+  const row = Math.floor(index / BOARD_SIZE)
+  const col = index % BOARD_SIZE
+
+  return {
+    x: Math.min(78, Math.max(22, (col + 0.5) * 20)),
+    y: Math.min(78, Math.max(22, (row + 0.5) * 20)),
+  }
+}
+
+function getSwapMotion(index: number, swap: number[]) {
+  if (swap.length !== 2 || !swap.includes(index)) {
+    return { col: 0, row: 0 }
+  }
+
+  const otherIndex = swap[0] === index ? swap[1] : swap[0]
+
+  return {
+    col: (otherIndex % BOARD_SIZE) - (index % BOARD_SIZE),
+    row: Math.floor(otherIndex / BOARD_SIZE) - Math.floor(index / BOARD_SIZE),
+  }
+}
+
 function getLeaderboardStatus(row: LeaderboardEntry, vipRank: number | null, reward: string) {
   if (row.vip) {
     return vipRank ? `VIP · rewards ranking #${vipRank} · ${reward}` : 'VIP · rewards ranking'
@@ -96,15 +150,22 @@ function getLeaderboardStatus(row: LeaderboardEntry, vipRank: number | null, rew
   return 'Pioneer · no rewards'
 }
 
-export function PiTilesGame() {
+type PiTilesGameProps = {
+  platform: 'pi' | 'android'
+}
+
+export function PiTilesGame({ platform }: PiTilesGameProps) {
+  const isAndroidApp = platform === 'android'
   const [piUser, setPiUser] = useState<PiUser | null>(null)
   const [isConnectingPi, setIsConnectingPi] = useState(false)
 
   const [board, setBoard] = useState<Board>(makeBoard)
   const [selected, setSelected] = useState<number | null>(null)
   const [lastSwap, setLastSwap] = useState<number[]>([])
+  const [invalidSwap, setInvalidSwap] = useState<number[]>([])
   const [lastMatches, setLastMatches] = useState<number[]>([])
   const [fallDistances, setFallDistances] = useState<number[]>([])
+  const [newTiles, setNewTiles] = useState<number[]>([])
   const [score, setScore] = useState(0)
   const [combo, setCombo] = useState(0)
   const [timeLeft, setTimeLeft] = useState(ROUND_SECONDS)
@@ -112,7 +173,9 @@ export function PiTilesGame() {
   const [message, setMessage] = useState('Pick a tile, then swap with a neighbor.')
   const [best, setBest] = useState(0)
   const [playerName, setPlayerName] = useState('')
+  const [leaderboardSearch, setLeaderboardSearch] = useState('')
   const [isVip, setIsVip] = useState(false)
+  const [isCheckingVipStatus, setIsCheckingVipStatus] = useState(false)
   const [isOpeningVipPayment, setIsOpeningVipPayment] = useState(false)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>(makeSeededLeaderboard)
   const [leaderboardWeek, setLeaderboardWeek] = useState(currentWeekLabel())
@@ -122,6 +185,8 @@ export function PiTilesGame() {
   const [lastPayload, setLastPayload] = useState<ScorePayload | null>(null)
   const [comboBurst, setComboBurst] = useState(0)
   const [comboCallout, setComboCallout] = useState<(typeof COMBO_CALLOUTS)[number] | null>(null)
+  const [bonusBursts, setBonusBursts] = useState<BonusBurst[]>([])
+  const [isBoardQuaking, setIsBoardQuaking] = useState(false)
   const [isRefilling, setIsRefilling] = useState(false)
   const [isAnimatingResolution, setIsAnimatingResolution] = useState(false)
   const [securityNote, setSecurityNote] = useState(
@@ -133,6 +198,7 @@ export function PiTilesGame() {
   const mounted = useRef(true)
   const connectRequest = useRef<Promise<PiUser> | null>(null)
   const tileDragStart = useRef<TileDragStart | null>(null)
+  const bonusBurstId = useRef(0)
   const suppressNextTileClick = useRef(false)
   const submitInFlight = useRef(false)
   const [rewardPool, setRewardPool] = useState<RewardPool>(() => calculateRewardPool(0))
@@ -143,10 +209,90 @@ export function PiTilesGame() {
   const nextRewardPreview = useMemo(() => `${3 * 3 * 10}+`, [])
   const isCriticalTimer = playing && timeLeft <= 10
   const isHotCombo = combo >= 5
+  const leaderboardQuery = leaderboardSearch.trim().toLowerCase()
+  const searchedLeaderboard = useMemo(() => {
+    if (!leaderboardQuery) return leaderboard
+
+    return leaderboard.filter((row) => {
+      const haystack = [row.name, row.piUid, `#${row.rank || ''}`, String(row.score)].join(' ').toLowerCase()
+
+      return haystack.includes(leaderboardQuery)
+    })
+  }, [leaderboard, leaderboardQuery])
+  const selectedLeaderboardPlayer = useMemo(() => {
+    if (!leaderboardQuery) return null
+
+    const exact =
+      leaderboard.find((row) => row.name.toLowerCase() === leaderboardQuery) ||
+      leaderboard.find((row) => row.piUid.toLowerCase() === leaderboardQuery) ||
+      searchedLeaderboard[0]
+
+    if (!exact) return null
+
+    const rows = leaderboard
+      .filter((row) => {
+        if (exact.piUid && row.piUid === exact.piUid) return true
+
+        return row.name.toLowerCase() === exact.name.toLowerCase()
+      })
+      .sort((a, b) => b.score - a.score || (a.rank || 9999) - (b.rank || 9999))
+    const bestRow = rows[0] || exact
+    const bestRank = rows.reduce((rank, row) => Math.min(rank, row.rank || rank), bestRow.rank || 0)
+    const vipRow = rows.find((row) => row.vip)
+    const vipRank = vipRow ? getVipRank(leaderboard, vipRow) : null
+
+    return {
+      name: exact.name,
+      rows,
+      bestScore: bestRow.score,
+      bestRank,
+      scoresCount: rows.length,
+      vip: rows.some((row) => row.vip),
+      vipRank,
+      reward: vipRow ? vipRow.reward || rewardForVipRank(vipRank, weeklyPool) : 'No rewards',
+    }
+  }, [leaderboard, leaderboardQuery, searchedLeaderboard, weeklyPool])
 
   const clearAnimationTimers = useCallback(() => {
     animationTimers.current.forEach((timer) => clearTimeout(timer))
     animationTimers.current = []
+  }, [])
+
+  const showBonusBursts = useCallback((bursts: Omit<BonusBurst, 'id'>[], quake = false) => {
+    if (bursts.length === 0 && !quake) return
+
+    if (bursts.length > 0) {
+      setBonusBursts(
+        bursts.map((burst) => {
+          bonusBurstId.current += 1
+
+          return {
+            ...burst,
+            id: bonusBurstId.current,
+          }
+        }),
+      )
+
+      const clearTimer = setTimeout(() => {
+        if (mounted.current) setBonusBursts([])
+      }, 700)
+      animationTimers.current.push(clearTimer)
+    }
+
+    if (quake) {
+      setIsBoardQuaking(false)
+
+      window.requestAnimationFrame(() => {
+        if (!mounted.current) return
+
+        setIsBoardQuaking(true)
+
+        const quakeTimer = setTimeout(() => {
+          if (mounted.current) setIsBoardQuaking(false)
+        }, 220)
+        animationTimers.current.push(quakeTimer)
+      })
+    }
   }, [])
 
   const connectPioneer = useCallback(async () => {
@@ -158,7 +304,7 @@ export function PiTilesGame() {
       setSecurityNote('Opening Pi authentication...')
 
       try {
-        const user = await authenticatePiUser()
+        const user = await withUiTimeout(authenticatePiUser(), PI_CONNECT_UI_TIMEOUT_MS, 'Pi authentication')
 
         if (!mounted.current) return user
 
@@ -222,6 +368,8 @@ export function PiTilesGame() {
     let cancelled = false
 
     async function loadVipStatus() {
+      setIsCheckingVipStatus(true)
+
       try {
         const status = await checkVipPass(piUser!.accessToken)
 
@@ -234,6 +382,8 @@ export function PiTilesGame() {
         }
       } catch (error) {
         console.warn('[PiTiles] VIP status check failed:', error)
+      } finally {
+        if (!cancelled) setIsCheckingVipStatus(false)
       }
     }
 
@@ -250,6 +400,8 @@ export function PiTilesGame() {
     let cancelled = false
 
     async function loadLeaderboard() {
+      if (document.visibilityState === 'hidden') return
+
       try {
         const weeklyLeaderboard = await fetchWeeklyLeaderboard()
 
@@ -266,11 +418,16 @@ export function PiTilesGame() {
     void loadLeaderboard()
     const timer = window.setInterval(() => {
       void loadLeaderboard()
-    }, 30000)
+    }, 120000)
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void loadLeaderboard()
+    }
+    document.addEventListener('visibilitychange', refreshWhenVisible)
 
     return () => {
       cancelled = true
       window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', refreshWhenVisible)
     }
   }, [playing])
 
@@ -281,8 +438,10 @@ export function PiTilesGame() {
     setBoard(makeBoard())
     setSelected(null)
     setLastSwap([])
+    setInvalidSwap([])
     setLastMatches([])
     setFallDistances([])
+    setNewTiles([])
     setIsRefilling(false)
     setIsAnimatingResolution(false)
     setScore(0)
@@ -295,6 +454,8 @@ export function PiTilesGame() {
     setLastPayload(null)
     setComboBurst(0)
     setComboCallout(null)
+    setBonusBursts([])
+    setIsBoardQuaking(false)
     setSecurityNote('Game running: valid swaps are being counted.')
     setMessage('Go! Match lines of 3+ to score.')
   }, [clearAnimationTimers])
@@ -388,20 +549,41 @@ export function PiTilesGame() {
   async function resolveSwap(a: number, b: number) {
     clearAnimationTimers()
 
+    const originalBoard = board
     const swapped = swapCells(board, a, b)
     const previewMatches = findMatches(swapped)
 
     setLastSwap([a, b])
+    setInvalidSwap([])
     setSelected(null)
 
     if (previewMatches.length === 0) {
+      setIsAnimatingResolution(true)
+      setBoard(swapped)
       setLastMatches([])
       setFallDistances([])
+      setNewTiles([])
       setIsRefilling(false)
-      setIsAnimatingResolution(false)
       setComboCallout(null)
       setSecurityNote('No-match swap: combo count unchanged.')
-      setMessage('No match found.')
+      setMessage('No match — try another neighbor.')
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, INVALID_SWAP_PREVIEW_MS)
+        animationTimers.current.push(timer)
+      })
+
+      setInvalidSwap([a, b])
+      setBoard(originalBoard)
+
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, INVALID_SWAP_REWIND_MS)
+        animationTimers.current.push(timer)
+      })
+
+      setLastSwap([])
+      setInvalidSwap([])
+      setIsAnimatingResolution(false)
       return
     }
 
@@ -448,6 +630,32 @@ export function PiTilesGame() {
         setIsRefilling(false)
       }
 
+      if (isVisibleCascade) {
+        const piBonusAnchor =
+          step.matches.find((index) => getTileSymbol(currentBoard[index]) === 'π') || step.matches[0] || 0
+        const bursts: Omit<BonusBurst, 'id'>[] = []
+
+        if (step.piMatchBonus > 0) {
+          bursts.push({
+            index: piBonusAnchor,
+            label: formatBonusBubble(step.piMatchBonus),
+            kind: 'pi-bonus',
+          })
+        }
+
+        const createdBombBonus = step.piBombsCreated > 0 ? Math.floor(step.piBombCreationBonus / step.piBombsCreated) : 0
+
+        step.piBombCreatedIndexes.forEach((index) => {
+          bursts.push({
+            index,
+            label: formatBonusBubble(createdBombBonus),
+            kind: 'pi-bomb',
+          })
+        })
+
+        showBonusBursts(bursts, step.combo >= 5 && (step.piBombCreatedIndexes.length > 0 || step.piBombExplodedIndexes.length > 0))
+      }
+
       setCombo((currentCombo) => currentCombo + 1)
       setScore((currentScore) => currentScore + step.gained)
       setComboBurst((burst) => burst + 1)
@@ -460,28 +668,36 @@ export function PiTilesGame() {
       }
 
       if (isVisibleCascade) {
+        const piBonusLabel = step.piBonus > 0 ? ` · PI BONUS +${step.piBonus}` : ''
+
         if (step.matched >= 8) {
-          setMessage(`${step.matched} tiles blasted · AREA BLAST · +${step.gained}`)
+          setMessage(`${step.matched} tiles blasted · AREA BLAST${piBonusLabel} · +${step.gained}`)
+        } else if (step.piBombsCreated > 0) {
+          setMessage(`Pi Bomb created · ${step.piMatched} Pi tiles${piBonusLabel} · +${step.gained}`)
+        } else if (step.piBonus > 0) {
+          setMessage(`${step.piMatched} Pi tiles matched${piBonusLabel} · +${step.gained}`)
         } else {
           setMessage(`${step.matched} tiles blasted · cascade ${cascadeCount} · +${step.gained}`)
         }
 
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, MATCH_FLASH_MS)
+          const timer = setTimeout(resolve, isAndroidApp ? 95 : MATCH_FLASH_MS)
           animationTimers.current.push(timer)
         })
 
         setLastMatches([])
         setFallDistances(step.fallDistances)
+        setNewTiles(step.newTileIndexes)
         setIsRefilling(true)
         setBoard(step.board)
 
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, REFILL_ANIMATION_MS)
+          const timer = setTimeout(resolve, isAndroidApp ? 180 : REFILL_ANIMATION_MS)
           animationTimers.current.push(timer)
         })
 
         setFallDistances([])
+        setNewTiles([])
         setIsRefilling(false)
       } else {
         setBoard(step.board)
@@ -494,6 +710,7 @@ export function PiTilesGame() {
     setValidMoves((currentMoves) => currentMoves + 1)
     setBoard(currentBoard)
     setIsAnimatingResolution(false)
+    setLastSwap([])
 
     if (findMatches(currentBoard).length > 0) {
       setSecurityNote('Long cascade paused without reshuffling; make another match to continue.')
@@ -533,6 +750,10 @@ export function PiTilesGame() {
   function handleTilePointerDown(event: PointerEvent<HTMLButtonElement>, index: number) {
     if (!playing || isAnimatingResolution) return
 
+    if (!isAndroidApp) {
+      event.preventDefault()
+    }
+
     tileDragStart.current = {
       index,
       pointerId: event.pointerId,
@@ -541,7 +762,10 @@ export function PiTilesGame() {
       resolved: false,
     }
     suppressNextTileClick.current = false
-    event.currentTarget.setPointerCapture(event.pointerId)
+
+    if (!isAndroidApp) {
+      event.currentTarget.setPointerCapture(event.pointerId)
+    }
   }
 
   function resolveTileSwipe(event: PointerEvent<HTMLButtonElement>) {
@@ -574,10 +798,18 @@ export function PiTilesGame() {
   }
 
   function handleTilePointerMove(event: PointerEvent<HTMLButtonElement>) {
+    if (!isAndroidApp && tileDragStart.current?.pointerId === event.pointerId) {
+      event.preventDefault()
+    }
+
     resolveTileSwipe(event)
   }
 
   function handleTilePointerUp(event: PointerEvent<HTMLButtonElement>) {
+    if (!isAndroidApp && tileDragStart.current?.pointerId === event.pointerId) {
+      event.preventDefault()
+    }
+
     resolveTileSwipe(event)
 
     const dragStart = tileDragStart.current
@@ -592,6 +824,10 @@ export function PiTilesGame() {
   }
 
   function handleTilePointerCancel(event: PointerEvent<HTMLButtonElement>) {
+    if (!isAndroidApp && tileDragStart.current?.pointerId === event.pointerId) {
+      event.preventDefault()
+    }
+
     const dragStart = tileDragStart.current
 
     if (!dragStart || dragStart.pointerId !== event.pointerId) return
@@ -618,12 +854,14 @@ export function PiTilesGame() {
     if (selected === null) {
       playTapSound()
       setSelected(index)
+      setMessage('Pick a neighboring tile.')
       return
     }
 
     if (selected === index) {
       playTapSound()
       setSelected(null)
+      setMessage('Pick a tile, then swap with a neighbor.')
       return
     }
 
@@ -638,26 +876,78 @@ export function PiTilesGame() {
   }
 
   async function handleVipPayment() {
-    if (isOpeningVipPayment) return
+    if (isOpeningVipPayment || isCheckingVipStatus) return
 
     if (isVip) {
-      setSecurityNote('VIP Pass is already active.')
-      setMessage('VIP Pass active.')
+      if (!piUser?.accessToken || piUser.fallbackMode) {
+        setSecurityNote('VIP Pass is active for this session.')
+        setMessage('VIP Pass active.')
+        return
+      }
+
+      setIsCheckingVipStatus(true)
+      setSecurityNote('Refreshing VIP Pass and rewards...')
+
+      try {
+        const [vipStatus, weeklyLeaderboard] = await Promise.all([
+          checkVipPass(piUser.accessToken),
+          fetchWeeklyLeaderboard(),
+        ])
+
+        setIsVip(Boolean(vipStatus.active))
+        setLeaderboard(weeklyLeaderboard.entries)
+        setLeaderboardWeek(weeklyLeaderboard.week)
+        setRewardPool(weeklyLeaderboard.rewards)
+
+        if (vipStatus.active) {
+          setSecurityNote('VIP Pass and rewards refreshed.')
+          setMessage('VIP rewards updated.')
+        } else {
+          setSecurityNote('VIP Pass has expired.')
+          setMessage('VIP Pass expired. Tap VIP to renew.')
+        }
+      } catch (error) {
+        console.warn('[PiTiles] VIP refresh failed:', error)
+        setSecurityNote('VIP status could not be refreshed. Please try again.')
+        setMessage('Unable to refresh VIP status.')
+      } finally {
+        setIsCheckingVipStatus(false)
+      }
+
       return
     }
 
-    let activePiUser = piUser
-
-    if (!activePiUser || activePiUser.fallbackMode || !activePiUser.accessToken) {
-      setSecurityNote('Connect Pioneer before opening VIP payment.')
-      setMessage('Connecting Pioneer...')
-      activePiUser = await connectPioneer()
+    if (!piUser || piUser.fallbackMode || !piUser.accessToken) {
+      setSecurityNote('VIP payment blocked: connect with Pi before opening payment.')
+      setMessage('Connect with Pi first.')
+      return
     }
 
-    if (!activePiUser || activePiUser.fallbackMode || !activePiUser.accessToken) {
-      setSecurityNote('VIP payment blocked: valid Pi authentication required.')
-      setMessage('Connect Pioneer first.')
+    setSecurityNote('Checking VIP status...')
+    setIsCheckingVipStatus(true)
+
+    try {
+      const vipStatus = await checkVipPass(piUser.accessToken)
+
+      if (vipStatus.active) {
+        setIsVip(true)
+        setSecurityNote('VIP Pass restored from server.')
+        setMessage('VIP Pass active.')
+        return
+      }
+
+      console.info('[PiTiles] VIP status checked before payment:', {
+        piUid: vipStatus.piUid,
+        username: vipStatus.username,
+        active: vipStatus.active,
+      })
+    } catch (error) {
+      console.warn('[PiTiles] VIP pre-payment status check failed:', error)
+      setSecurityNote('VIP status could not be verified. Please try again.')
+      setMessage('Unable to verify VIP status.')
       return
+    } finally {
+      setIsCheckingVipStatus(false)
     }
 
     setSecurityNote('Opening Pi payment…')
@@ -686,6 +976,17 @@ export function PiTilesGame() {
       return
     }
 
+    if (result.alreadyVip) {
+      setIsVip(true)
+      setSecurityNote(
+        result.vipExpiresAt
+          ? `VIP active until ${new Date(result.vipExpiresAt).toLocaleDateString()}.`
+          : 'VIP Pass is already active.',
+      )
+      setMessage('VIP Pass active.')
+      return
+    }
+
     if (result.cancelled) {
       setSecurityNote('VIP payment cancelled.')
       setMessage('VIP payment cancelled.')
@@ -697,7 +998,11 @@ export function PiTilesGame() {
   }
 
   return (
-    <main className={`pi-shell ${isCriticalTimer ? 'timer-danger' : ''}`}>
+    <main
+      className={`pi-shell ${isAndroidApp ? 'is-android-app' : ''} ${
+        playing ? 'is-game-active' : ''
+      } ${isCriticalTimer ? 'timer-danger' : ''}`}
+    >
       <div className="pi-bg" />
 
       <div className="pi-particles" aria-hidden="true">
@@ -717,17 +1022,17 @@ export function PiTilesGame() {
             <div>
               <div className="pi-eyebrow">
                 <Icon name="sparkles" tone="tone-amber" />
-                <span>The arcade Tiles Game</span>
+                <span>{isAndroidApp ? 'Neon Puzzle Arcade' : 'The arcade Tiles Game'}</span>
               </div>
 
               <h1>Pi Tiles</h1>
 
               <div className={`pi-user-badge ${isRealPiAuth ? 'is-sdk' : 'is-guest'}`}>
-                <span>{isRealPiAuth ? 'Hey ! Pioneer' : 'Guest Mode'}</span>
-                <strong>{playerName || piUser?.username || 'Guest'}</strong>
+                <span>{isAndroidApp ? 'Guest Mode' : isRealPiAuth ? 'Hey ! Pioneer' : 'Guest Mode'}</span>
+                <strong>{isAndroidApp ? 'Android' : playerName || piUser?.username || 'Guest'}</strong>
               </div>
 
-              {!isRealPiAuth && (
+              {!isAndroidApp && !isRealPiAuth && (
                 <button
                   type="button"
                   onClick={() => void connectPioneer()}
@@ -777,15 +1082,23 @@ export function PiTilesGame() {
           <div
             className={`board-wrap ${
               lastSwap.length > 0 && (lastMatches.length > 0 || isRefilling) ? 'has-swap-trail' : ''
-            } ${lastMatches.length >= 8 ? 'blast-surge' : ''} ${isRefilling ? 'is-refilling' : ''}`}
+            } ${lastMatches.length >= 8 ? 'blast-surge' : ''} ${isRefilling ? 'is-refilling' : ''} ${
+              isAnimatingResolution ? 'is-resolving' : ''
+            } ${isBoardQuaking ? 'combo-quake' : ''}`}
           >
             <div className="tile-board">
               {board.map((tile, index) => {
                 const symbol = getTileSymbol(tile)
                 const active = selected === index
+                const neighborHint = playing && !isAnimatingResolution && selected !== null && areNeighbors(selected, index)
                 const swapped = lastSwap.includes(index)
+                const invalid = invalidSwap.includes(index)
                 const matched = lastMatches.includes(index)
+                const isNewTile = newTiles.includes(index)
                 const fallDistance = fallDistances[index] || 0
+                const fallDelay = fallDistance > 0 ? Math.min(68, (index % BOARD_SIZE) * 10 + fallDistance * 7) : 0
+                const fallDrift = fallDistance > 0 ? (((index % BOARD_SIZE) - 2) * 3.8 + (fallDistance % 2 === 0 ? 2.4 : -2.4)) : 0
+                const swapMotion = getSwapMotion(index, invalid ? invalidSwap : lastSwap)
                 const tilePower = getTilePower(tile)
 
                 return (
@@ -797,16 +1110,47 @@ export function PiTilesGame() {
                     onPointerUp={handleTilePointerUp}
                     onPointerCancel={handleTilePointerCancel}
                     onClick={() => handleTileClick(index)}
-                    style={{ '--fall-y': `${-fallDistance * TILE_SIZE_PX}px` } as CSSProperties}
-                    className={`tile ${SYMBOL_STYLES[symbol]} ${active ? 'is-active' : ''} ${swapped ? 'is-swapped' : ''} ${
-                      matched && lastMatches.length < 8 ? 'is-matched' : ''
-                    } ${tilePower === 'pi-bomb' ? 'is-pi-bomb' : ''} ${
+                    style={
+                      {
+                        '--fall-y': `${-fallDistance * TILE_SIZE_PX}px`,
+                        '--fall-delay': `${fallDelay}ms`,
+                        '--fall-drift': `${fallDrift}px`,
+                        '--swap-col': swapMotion.col,
+                        '--swap-row': swapMotion.row,
+                      } as CSSProperties
+                    }
+                    className={`tile ${SYMBOL_STYLES[symbol]} ${active ? 'is-active' : ''} ${
+                      neighborHint ? 'is-neighbor-hint' : ''
+                    } ${swapped ? 'is-swapped' : ''} ${
+                      invalid ? 'is-invalid-swap' : ''
+                    } ${matched && lastMatches.length < 8 ? 'is-matched' : ''} ${tilePower === 'pi-bomb' ? 'is-pi-bomb' : ''} ${
                       matched && lastMatches.length >= 8 ? 'is-area-blast' : ''
-                    } ${fallDistance > 0 ? 'is-falling' : ''}`}
+                    } ${fallDistance > 0 ? 'is-falling' : ''} ${isNewTile ? 'is-new-tile' : ''}`}
                     aria-label={`Tile ${symbol} ${index + 1}${tilePower === 'pi-bomb' ? ' Pi Bomb' : ''}`}
                   >
                     <span>{symbol}</span>
                   </button>
+                )
+              })}
+            </div>
+
+            <div className="bonus-burst-layer" aria-hidden="true">
+              {bonusBursts.map((burst) => {
+                const position = getBonusBurstPosition(burst.index)
+
+                return (
+                  <div
+                    key={burst.id}
+                    className={`bonus-burst ${burst.kind}`}
+                    style={
+                      {
+                        '--burst-x': `${position.x}%`,
+                        '--burst-y': `${position.y}%`,
+                      } as CSSProperties
+                    }
+                  >
+                    <span>{burst.label}</span>
+                  </div>
                 )
               })}
             </div>
@@ -829,71 +1173,80 @@ export function PiTilesGame() {
             </div>
           </div>
 
-          <div className="actions-grid">
+          <div className={`actions-grid ${isAndroidApp ? 'android-actions' : ''}`}>
             <button type="button" onClick={start} className="primary-button">
               <Icon name="zap" />
               {playing ? 'Restart' : 'Start Game'}
             </button>
 
-            <button
-              type="button"
-              onClick={() => void handleVipPayment()}
-              className="secondary-button"
-              disabled={isOpeningVipPayment}
-            >
-              {isOpeningVipPayment ? 'Opening...' : isVip ? 'VIP Active' : 'VIP'}
-            </button>
+            {!isAndroidApp && (
+              <button
+                type="button"
+                onClick={() => void handleVipPayment()}
+                className="secondary-button"
+                disabled={isOpeningVipPayment || isCheckingVipStatus}
+                aria-pressed={isVip}
+              >
+                {isCheckingVipStatus ? 'Checking...' : isOpeningVipPayment ? 'Opening...' : isVip ? 'VIP Active' : 'VIP'}
+              </button>
+            )}
           </div>
 
-          <section className={`panel panel-amber ${isVip ? 'vip-aura' : ''}`}>
-            <div className="panel-title-row">
+          {isAndroidApp && <AndroidAdSlot />}
+
+          {!isAndroidApp && (
+            <section className={`panel panel-amber ${isVip ? 'vip-aura' : ''}`}>
+              <div className="panel-title-row">
+                <div className="panel-title">
+                  <Icon name="crown" tone="tone-amber" />
+                  <h2>VIP Pass</h2>
+                </div>
+
+                <div className="pill">{VIP_PRICE_PI} Pi / week</div>
+              </div>
+
+              <p>VIP Pass unlocks the weekly VIP reward circuit.</p>
+
+              <div className="reward-grid">
+                <div>
+                  <strong className="tone-amber">{vipMembers}</strong>
+                  <span>Active VIPs</span>
+                </div>
+
+                <div className="reward-pool-cell">
+                  <strong className="tone-emerald">{weeklyPool.toFixed(2)} Pi</strong>
+                  <span>Weekly Prize Pool</span>
+                </div>
+              </div>
+
+              <div className="security-note">
+                <Icon name="shield" tone="tone-emerald" />
+                <span>
+                  {securityNote} · Valid Swaps: {validMoves} · Games Submitted: {gamesPlayed}
+                </span>
+              </div>
+            </section>
+          )}
+
+          {SHOW_PI_DEBUG_PANEL && !isAndroidApp && (
+            <section className="panel panel-cyan">
               <div className="panel-title">
-                <Icon name="crown" tone="tone-amber" />
-                <h2>VIP Pass</h2>
+                <Icon name="server" tone="tone-cyan" />
+                <h2>Pi Integration</h2>
               </div>
 
-              <div className="pill">{VIP_PRICE_PI} Pi / week</div>
-            </div>
-
-            <p>VIP Pass unlocks the weekly VIP reward circuit.</p>
-
-            <div className="reward-grid">
-              <div>
-                <strong className="tone-amber">{vipMembers}</strong>
-                <span>Active VIPs</span>
+              <div className="integration-grid">
+                <div>Auth Pi: {isRealPiAuth ? PI_INTEGRATION_STATUS.auth : 'guest'}</div>
+                <div>Payments: {PI_INTEGRATION_STATUS.payments}</div>
+                <div>Leaderboard: {PI_INTEGRATION_STATUS.leaderboard}</div>
+                <div>Rewards: {PI_INTEGRATION_STATUS.rewards}</div>
               </div>
 
-              <div className="reward-pool-cell">
-                <strong className="tone-emerald">{weeklyPool.toFixed(2)} Pi</strong>
-                <span>Weekly Prize Pool</span>
+              <div className="payload-box">
+                Last server payload: {lastPayload ? `${lastPayload.username} · ${lastPayload.score} pts · ${lastPayload.week}` : 'no score submitted'}
               </div>
-            </div>
-
-            <div className="security-note">
-              <Icon name="shield" tone="tone-emerald" />
-              <span>
-                {securityNote} · Valid Swaps: {validMoves} · Games Submitted: {gamesPlayed}
-              </span>
-            </div>
-          </section>
-
-          <section className="panel panel-cyan">
-            <div className="panel-title">
-              <Icon name="server" tone="tone-cyan" />
-              <h2>Pi Integration</h2>
-            </div>
-
-            <div className="integration-grid">
-              <div>Auth Pi: {isRealPiAuth ? PI_INTEGRATION_STATUS.auth : 'guest'}</div>
-              <div>Payments: {PI_INTEGRATION_STATUS.payments}</div>
-              <div>Leaderboard: {PI_INTEGRATION_STATUS.leaderboard}</div>
-              <div>Rewards: {PI_INTEGRATION_STATUS.rewards}</div>
-            </div>
-
-            <div className="payload-box">
-              Last server payload: {lastPayload ? `${lastPayload.username} · ${lastPayload.score} pts · ${lastPayload.week}` : 'no score submitted'}
-            </div>
-          </section>
+            </section>
+          )}
 
           <section className="panel panel-dark">
             <div className="leaderboard-head">
@@ -906,16 +1259,54 @@ export function PiTilesGame() {
 
             <div className="submit-row">
               <input
-                value={playerName}
-                onChange={(event) => setPlayerName(event.target.value)}
-                placeholder="Pioneer Name"
-                aria-label="Pioneer Name"
+                value={leaderboardSearch}
+                onChange={(event) => setLeaderboardSearch(event.target.value)}
+                placeholder="Search player"
+                aria-label="Search player in leaderboard"
               />
             </div>
 
+            {selectedLeaderboardPlayer && (
+              <div className="leaderboard-player-summary">
+                <div>
+                  <span>Player</span>
+                  <strong>{selectedLeaderboardPlayer.name}</strong>
+                </div>
+
+                <div>
+                  <span>Best rank</span>
+                  <strong>#{selectedLeaderboardPlayer.bestRank}</strong>
+                </div>
+
+                <div>
+                  <span>Best score</span>
+                  <strong>{selectedLeaderboardPlayer.bestScore}</strong>
+                </div>
+
+                <div>
+                  <span>Scores</span>
+                  <strong>{selectedLeaderboardPlayer.scoresCount}</strong>
+                </div>
+
+                <div>
+                  <span>Status</span>
+                  <strong>{selectedLeaderboardPlayer.vip ? `VIP #${selectedLeaderboardPlayer.vipRank}` : 'Pioneer'}</strong>
+                </div>
+
+                <div>
+                  <span>Reward</span>
+                  <strong>{selectedLeaderboardPlayer.reward}</strong>
+                </div>
+              </div>
+            )}
+
             <div className="leaderboard-list">
-              {leaderboard.map((row, index) => {
-                const rank = row.rank || index + 1
+              {searchedLeaderboard.length === 0 && (
+                <div className="leaderboard-empty">No player found.</div>
+              )}
+
+              {searchedLeaderboard.map((row) => {
+                const rank = row.rank || leaderboard.findIndex((entry) => entry.id === row.id) + 1
                 const vipRank = getVipRank(leaderboard, row)
                 const reward = row.reward || rewardForVipRank(vipRank, weeklyPool)
                 const rewardLabel = row.vip ? reward : 'No rewards'
@@ -924,7 +1315,9 @@ export function PiTilesGame() {
                 return (
                   <div
                     key={row.id}
-                    className={`leaderboard-row ${row.isPlayer ? 'is-player' : ''} ${row.vip ? 'is-vip' : ''} ${index < 3 ? 'is-podium' : ''}`}
+                    className={`leaderboard-row ${row.isPlayer ? 'is-player' : ''} ${row.vip ? 'is-vip' : ''} ${
+                      rank <= 3 ? 'is-podium' : ''
+                    } ${leaderboardQuery ? 'is-search-match' : ''}`}
                   >
                     <div className="leaderboard-player">
                       <div className={`rank rank-${rank}`}>#{rank}</div>
@@ -949,17 +1342,21 @@ export function PiTilesGame() {
             </div>
           </section>
 
-          <section className="panel panel-dark checklist">
-            <div className="panel-title">
-              <Icon name="wallet" tone="tone-amber" />
-              <h2>Production checklist</h2>
-            </div>
+          {isAndroidApp && <AndroidPiBridge />}
 
-            <p>1. Pi username authentication enabled.</p>
-            <p>2. VIP payment opens through the Pi SDK.</p>
-            <p>3. Scores are protected by the anti-cheat MVP.</p>
-            <p>4. Weekly VIP rewards are simulated for Testnet.</p>
-          </section>
+          {!isAndroidApp && (
+            <section className="panel panel-dark checklist">
+              <div className="panel-title">
+                <Icon name="wallet" tone="tone-amber" />
+                <h2>Production checklist</h2>
+              </div>
+
+              <p>1. Pi username authentication enabled.</p>
+              <p>2. VIP payment opens through the Pi SDK.</p>
+              <p>3. Scores are protected by the anti-cheat MVP.</p>
+              <p>4. Weekly VIP rewards are simulated for Testnet.</p>
+            </section>
+          )}
         </div>
       </section>
     </main>

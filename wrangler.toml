@@ -22,3 +22,6 @@ headers = [
 [[kv_namespaces]]
 binding = "LEADERBOARD"
 id = "11592418f95e4421bbc2d37bc9c910ec"
+
+[triggers]
+crons = ["0 1 * * SUN"]

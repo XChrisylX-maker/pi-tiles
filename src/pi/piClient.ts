@@ -20,6 +20,7 @@ export type VipPaymentResult = {
   vipExpiresAt?: string
   fallbackMode: boolean
   cancelled?: boolean
+  alreadyVip?: boolean
   error?: string
 }
 
@@ -29,6 +30,8 @@ type VipPaymentOptions = {
 
 type VipPass = {
   active: boolean
+  piUid?: string
+  username?: string
   expiresAt?: string
 }
 
@@ -123,6 +126,16 @@ function shouldUsePiSandbox() {
   return !['false', '0', 'off', 'mainnet'].includes(PI_SANDBOX_ENV)
 }
 
+function getPiSdkMode() {
+  const sandbox = shouldUsePiSandbox()
+
+  return {
+    sandbox,
+    hostname: typeof window === 'undefined' ? 'server' : window.location.hostname,
+    env: PI_SANDBOX_ENV,
+  }
+}
+
 export function createMockPiUser(): PiUser {
   return {
     piUid: 'guest-user',
@@ -166,7 +179,7 @@ async function reportIncompletePayment(payment: unknown, accessToken?: string) {
 
   if (!paymentId) return
 
-  await fetch('/api/pi/payments/incomplete', {
+  await fetch(apiUrl('/api/pi/payments/incomplete'), {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -207,11 +220,15 @@ export async function initPiSdk() {
     }
 
     try {
+      const sdkMode = getPiSdkMode()
+
+      console.info('[Pi SDK] initializing', sdkMode)
+
       await withTimeout(
         Promise.resolve(
           window.Pi.init({
             version: PI_SDK_VERSION,
-            sandbox: shouldUsePiSandbox(),
+            sandbox: sdkMode.sandbox,
           }),
         ),
         PI_SDK_INIT_TIMEOUT_MS,
@@ -237,7 +254,7 @@ async function postJson<TResponse>(url: string, body: Record<string, unknown>): 
   const timer = setTimeout(() => controller.abort(), PI_BACKEND_TIMEOUT_MS)
 
   try {
-    const response = await fetch(url, {
+    const response = await fetch(apiUrl(url), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -281,7 +298,7 @@ async function completePayment(paymentId: string, txid: string, identifier: stri
 }
 
 export async function checkVipPass(accessToken: string) {
-  return postJson<{ active: boolean; vipPass?: VipPass; error?: string }>('/api/pi/vip/status', {
+  return postJson<{ active: boolean; piUid?: string; username?: string; vipPass?: VipPass; error?: string }>('/api/pi/vip/status', {
     accessToken,
   })
 }
@@ -401,15 +418,40 @@ export async function requestVipPayment(options: VipPaymentOptions = {}): Promis
   const paymentIdentifier = `playpitiles-vip-${Date.now()}`
 
   try {
-    options.onStatus?.('Requesting Pi payment permission...')
-    await requestPaymentScope(accessToken)
+    options.onStatus?.('Checking VIP status...')
+    const vipStatus = await checkVipPass(accessToken)
+
+    if (vipStatus.active) {
+      return {
+        paid: false,
+        fallbackMode: false,
+        alreadyVip: true,
+        vipExpiresAt: vipStatus.vipPass?.expiresAt,
+        error: 'VIP Pass is already active.',
+      }
+    }
   } catch (error) {
-    console.error('[Pi SDK] Payment permission failed:', error)
+    console.warn('[Pi SDK] VIP status check before payment failed:', error)
 
     return {
       paid: false,
       fallbackMode: false,
-      error: error instanceof Error ? error.message : 'Pi payment permission failed',
+      error: error instanceof Error ? error.message : 'VIP status could not be verified.',
+    }
+  }
+
+  if (!paymentScopeGranted) {
+    try {
+      options.onStatus?.('Requesting Pi payment permission...')
+      await requestPaymentScope(accessToken)
+    } catch (error) {
+      console.error('[Pi SDK] Payment permission failed:', error)
+
+      return {
+        paid: false,
+        fallbackMode: false,
+        error: error instanceof Error ? error.message : 'Pi payment permission failed',
+      }
     }
   }
 
@@ -458,6 +500,7 @@ export async function requestVipPayment(options: VipPaymentOptions = {}): Promis
               console.info('[Pi SDK] Payment approved by backend:', paymentId)
             } catch (error) {
               console.error('[Pi SDK] Backend approval failed:', error)
+              options.onStatus?.('Payment approval failed. Please close this payment and try again.')
 
               finish({
                 paid: false,
@@ -529,3 +572,4 @@ export async function requestVipPayment(options: VipPaymentOptions = {}): Promis
     }
   })
 }
+import { apiUrl } from '../api/apiUrl'

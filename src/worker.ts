@@ -13,20 +13,23 @@ const PI_API_BASE = 'https://api.minepi.com/v2'
 const PI_API_TIMEOUT_MS = 15000
 const REWARD_RANK_LIMIT = 10
 const DAY_MS = 24 * 60 * 60 * 1000
-const GMT_PLUS_ONE_OFFSET_MS = 60 * 60 * 1000
+const WEEKLY_RESET_UTC_HOUR = 1
 const LEADERBOARD_TTL_SECONDS = 60 * 60 * 24 * 14
+const SETTLEMENT_TTL_SECONDS = 60 * 60 * 24 * 90
 const MIN_VALID_MOVES = 2
 const REWARD_SHARES = [0.25, 0.15, 0.1, 0.5 / 7, 0.5 / 7, 0.5 / 7, 0.5 / 7, 0.5 / 7, 0.5 / 7, 0.5 / 7] as const
 const VIP_PRICE_PI = 1
 const VIP_POOL_SHARE = 0.2
 const A2U_PAYMENT_TTL_SECONDS = 60 * 60 * 24 * 30
 const GLOBAL_KNOWN_PI_USERS_KEY = 'known-pi-users:global'
+const KNOWN_PI_USER_PREFIX = 'known-pi-user:'
+const VIP_USERNAME_INDEX_PREFIX = 'vip-username:'
 const KNOWN_PI_USERS_LOOKBACK_WEEKS = 8
 
 type KVNamespace = {
   get: (key: string) => Promise<string | null>
   put: (key: string, value: string, options?: { expirationTtl?: number }) => Promise<void>
-  list?: (options?: { prefix?: string }) => Promise<{ keys: { name: string }[]; list_complete: boolean; cursor?: string }>
+  list?: (options?: { prefix?: string; cursor?: string }) => Promise<{ keys: { name: string }[]; list_complete: boolean; cursor?: string }>
 }
 
 type AuthVerifyBody = {
@@ -87,6 +90,27 @@ type VipRewardStats = {
   updatedAt: string
 }
 
+type RewardSettlementRecipient = {
+  piUid: string
+  username: string
+  amount: number
+  scoreRanks: number[]
+  scoreIds: string[]
+}
+
+type RewardSettlement = {
+  week: string
+  weekKey: string
+  weekStartsAt: string
+  weekEndsAt: string
+  closedAt: string
+  weeklyPool: number
+  rewardedScores: number
+  entries: LeaderboardEntry[]
+  recipients: RewardSettlementRecipient[]
+  status: 'ready'
+}
+
 type VipPass = {
   active: boolean
   piUid: string
@@ -113,6 +137,15 @@ type CompleteBody = {
 
 type VipStatusBody = {
   accessToken?: string
+}
+
+type ExpireVipPassBody = {
+  piUid?: string
+  accessToken?: string
+}
+
+type DeletableKVNamespace = KVNamespace & {
+  delete(key: string): Promise<void>
 }
 
 type IncompleteBody = {
@@ -300,6 +333,49 @@ async function getPiApiKey(env: Env) {
   return (await resolveSecretBinding(env.PI_API_KEY)) || (await resolveSecretBinding(env.PI_SERVER_API_KEY))
 }
 
+async function getSecretFingerprint(value: string) {
+  if (!value) return 'absent'
+
+  const bytes = new TextEncoder().encode(value)
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+
+  return Array.from(new Uint8Array(digest).slice(0, 5))
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('')
+}
+
+async function getPiApiKeyCandidates(env: Env) {
+  const configuredCandidates = [
+    {
+      source: 'PI_API_KEY',
+      value: await resolveSecretBinding(env.PI_API_KEY),
+    },
+    {
+      source: 'PI_SERVER_API_KEY',
+      value: await resolveSecretBinding(env.PI_SERVER_API_KEY),
+    },
+  ]
+
+  console.info('[Pi API] configured payment keys', {
+    keys: await Promise.all(
+      configuredCandidates.map(async (candidate) => ({
+        source: candidate.source,
+        available: Boolean(candidate.value),
+        length: candidate.value.length,
+        fingerprint: await getSecretFingerprint(candidate.value),
+      })),
+    ),
+    identical:
+      Boolean(configuredCandidates[0].value) &&
+      configuredCandidates[0].value === configuredCandidates[1].value,
+  })
+
+  return configuredCandidates.filter(
+    (candidate, index, allCandidates) =>
+      candidate.value && allCandidates.findIndex((other) => other.value === candidate.value) === index,
+  )
+}
+
 async function getPiAdminToken(env: Env) {
   return resolveSecretBinding(env.PI_ADMIN_TOKEN)
 }
@@ -314,6 +390,18 @@ function isVipPaymentIdentifier(identifier?: string) {
 
 function getVipPassKey(piUid: string) {
   return `vip-pass:${piUid}`
+}
+
+function getVipUsernameIndexKey(username: string) {
+  return `${VIP_USERNAME_INDEX_PREFIX}${username.trim().toLowerCase()}`
+}
+
+function isCurrentVipPass(pass: VipPass | null) {
+  if (!pass?.active) return false
+  if (!pass.expiresAt || new Date(pass.expiresAt).getTime() <= Date.now()) return false
+  if (pass.activatedAt && getWeeklyPeriod(new Date(pass.activatedAt)).key !== getWeeklyPeriod().key) return false
+
+  return true
 }
 
 async function storeVipPass({
@@ -336,6 +424,7 @@ async function storeVipPass({
   const existingPass = await readVipPass(env, user.uid)
 
   if (existingPass && getWeeklyPeriod(new Date(existingPass.activatedAt)).key === week.key) {
+    await upgradeCurrentWeekScoresToVip(env, user.uid, week)
     return existingPass
   }
 
@@ -356,7 +445,13 @@ async function storeVipPass({
   await env.LEADERBOARD.put(getVipPassKey(user.uid), JSON.stringify(pass), {
     expirationTtl: ttlSeconds,
   })
+  if (pass.username) {
+    await env.LEADERBOARD.put(getVipUsernameIndexKey(pass.username), user.uid, {
+      expirationTtl: ttlSeconds,
+    })
+  }
   await incrementVipRewardStats(env)
+  await upgradeCurrentWeekScoresToVip(env, user.uid, week)
 
   return pass
 }
@@ -370,8 +465,7 @@ async function readVipPass(env: Env, piUid: string) {
   try {
     const pass = JSON.parse(stored) as VipPass
 
-    if (!pass.expiresAt || new Date(pass.expiresAt).getTime() <= Date.now()) return null
-    if (pass.activatedAt && getWeeklyPeriod(new Date(pass.activatedAt)).key !== getWeeklyPeriod().key) return null
+    if (!isCurrentVipPass(pass)) return null
 
     return {
       ...pass,
@@ -381,6 +475,109 @@ async function readVipPass(env: Env, piUid: string) {
     console.error('[VIP] failed to parse VIP pass', error)
     return null
   }
+}
+
+async function readVipPassByUsername(env: Env, username: string) {
+  if (!env.LEADERBOARD || !username.trim()) return null
+
+  const normalizedUsername = username.trim().toLowerCase()
+  const indexedUid = await env.LEADERBOARD.get(getVipUsernameIndexKey(normalizedUsername))
+
+  if (indexedUid) {
+    return readVipPass(env, indexedUid)
+  }
+
+  if (!env.LEADERBOARD.list) return null
+
+  const activePasses = await readActiveVipPasses(env)
+  const matchedPass =
+    activePasses.find((pass) => pass.username?.trim().toLowerCase() === normalizedUsername) || null
+
+  if (matchedPass?.piUid) {
+    const ttlSeconds = Math.max(
+      60,
+      Math.ceil((new Date(matchedPass.expiresAt).getTime() - Date.now()) / 1000),
+    )
+    await env.LEADERBOARD.put(getVipUsernameIndexKey(normalizedUsername), matchedPass.piUid, {
+      expirationTtl: ttlSeconds,
+    })
+  }
+
+  return matchedPass
+}
+
+async function readActiveVipPasses(env: Env) {
+  const activePasses: VipPass[] = []
+
+  if (!env.LEADERBOARD?.list) return activePasses
+
+  const leaderboard = env.LEADERBOARD
+  let cursor: string | undefined
+
+  do {
+    const page = await leaderboard.list!({
+      prefix: 'vip-pass:',
+      ...(cursor ? { cursor } : {}),
+    })
+
+    await Promise.all(page.keys.map(async (listedKey) => {
+      const stored = await leaderboard.get(listedKey.name)
+      if (!stored) return
+
+      try {
+        const pass = JSON.parse(stored) as VipPass
+
+        if (isCurrentVipPass(pass)) {
+          activePasses.push({
+            ...pass,
+            active: true,
+          })
+        }
+      } catch (error) {
+        console.error('[VIP] failed to parse VIP pass during active-pass lookup', error)
+      }
+    }))
+
+    cursor = page.list_complete ? undefined : page.cursor
+  } while (cursor)
+
+  return activePasses
+}
+
+async function migrateVipPassToUser(env: Env, pass: VipPass, user: PiMeResponse) {
+  if (!env.LEADERBOARD || !user.uid || pass.piUid === user.uid) return pass
+
+  const expiresAt = new Date(pass.expiresAt)
+  const ttlSeconds = Math.max(60, Math.ceil((expiresAt.getTime() - Date.now()) / 1000))
+  const migratedPass: VipPass = {
+    ...pass,
+    active: true,
+    piUid: user.uid,
+    username: user.username || pass.username || '',
+  }
+
+  await env.LEADERBOARD.put(getVipPassKey(user.uid), JSON.stringify(migratedPass), {
+    expirationTtl: ttlSeconds,
+  })
+  if (migratedPass.username) {
+    await env.LEADERBOARD.put(getVipUsernameIndexKey(migratedPass.username), user.uid, {
+      expirationTtl: ttlSeconds,
+    })
+  }
+
+  return migratedPass
+}
+
+async function resolveVipPassForUser(env: Env, user: PiMeResponse) {
+  const uidPass = await readVipPass(env, user.uid || '')
+  if (uidPass) return { vipPass: uidPass, matchedBy: 'uid' as const }
+
+  const usernamePass = await readVipPassByUsername(env, user.username || '')
+  if (!usernamePass) return { vipPass: null, matchedBy: null }
+
+  const migratedPass = await migrateVipPassToUser(env, usernamePass, user)
+
+  return { vipPass: migratedPass, matchedBy: 'username' as const }
 }
 
 async function fetchWithTimeout(input: RequestInfo | URL, init?: RequestInit, timeoutMs = PI_API_TIMEOUT_MS) {
@@ -436,21 +633,22 @@ async function verifyAccessToken(accessToken: string): Promise<PiMeResponse> {
 }
 
 function getWeeklyPeriod(date = new Date()) {
-  const gmtPlusOneDate = new Date(date.getTime() + GMT_PLUS_ONE_OFFSET_MS)
-  const gmtPlusOneDay = gmtPlusOneDate.getUTCDay()
-  const gmtPlusOneMidnight = Date.UTC(
-    gmtPlusOneDate.getUTCFullYear(),
-    gmtPlusOneDate.getUTCMonth(),
-    gmtPlusOneDate.getUTCDate(),
+  const shiftedDate = new Date(date.getTime() - WEEKLY_RESET_UTC_HOUR * 60 * 60 * 1000)
+  const shiftedMidnight = Date.UTC(
+    shiftedDate.getUTCFullYear(),
+    shiftedDate.getUTCMonth(),
+    shiftedDate.getUTCDate(),
   )
-  const startLocalMidnight = gmtPlusOneMidnight - gmtPlusOneDay * DAY_MS
-  const startUtc = new Date(startLocalMidnight - GMT_PLUS_ONE_OFFSET_MS)
+  const startUtc = new Date(
+    shiftedMidnight -
+      shiftedDate.getUTCDay() * DAY_MS +
+      WEEKLY_RESET_UTC_HOUR * 60 * 60 * 1000,
+  )
   const endUtc = new Date(startUtc.getTime() + 7 * DAY_MS)
-  const startLabelDate = new Date(startUtc.getTime() + GMT_PLUS_ONE_OFFSET_MS)
-  const year = startLabelDate.getUTCFullYear()
+  const year = startUtc.getUTCFullYear()
   const firstSunday = new Date(Date.UTC(year, 0, 1))
   firstSunday.setUTCDate(firstSunday.getUTCDate() - firstSunday.getUTCDay())
-  const week = Math.floor((startLabelDate.getTime() - firstSunday.getTime()) / (7 * DAY_MS)) + 1
+  const week = Math.floor((startUtc.getTime() - firstSunday.getTime()) / (7 * DAY_MS)) + 1
   const paddedWeek = String(week).padStart(2, '0')
 
   return {
@@ -473,8 +671,16 @@ function getVipStatsKey(weekKey: string) {
   return `vip-stats:${weekKey}`
 }
 
+function getRewardSettlementKey(weekKey: string) {
+  return `reward-settlement:${weekKey}`
+}
+
 function getKnownPiUsersKey(weekKey: string) {
   return `known-pi-users:${weekKey}`
+}
+
+function getKnownPiUserKey(uid: string) {
+  return `${KNOWN_PI_USER_PREFIX}${uid}`
 }
 
 function getAppToUserPaymentKey(paymentId: string) {
@@ -588,12 +794,64 @@ async function readGlobalKnownPiUsers(env: Env) {
   return readKnownPiUsersByKey(env, GLOBAL_KNOWN_PI_USERS_KEY)
 }
 
+async function readIndividuallyKnownPiUsers(env: Env) {
+  if (!env.LEADERBOARD?.list) return []
+
+  const users: KnownPiUser[] = []
+  let cursor: string | undefined
+
+  do {
+    const page = await env.LEADERBOARD.list({
+      prefix: KNOWN_PI_USER_PREFIX,
+      ...(cursor ? { cursor } : {}),
+    })
+
+    const pageUsers = await Promise.all(
+      page.keys.map(async ({ name }) => {
+        const stored = await env.LEADERBOARD!.get(name)
+        if (!stored) return null
+
+        try {
+          const user = JSON.parse(stored) as KnownPiUser
+          return user.uid ? user : null
+        } catch (error) {
+          console.error('[Pi Auth] failed to parse individual known Pi user', error)
+          return null
+        }
+      }),
+    )
+
+    users.push(...pageUsers.filter((user): user is KnownPiUser => Boolean(user)))
+    cursor = page.list_complete ? undefined : page.cursor
+  } while (cursor)
+
+  return users
+}
+
 async function rememberPiUser(env: Env, user: PiMeResponse, week = getWeeklyPeriod()) {
   if (!env.LEADERBOARD || !user.uid) return
 
+  const individualKey = getKnownPiUserKey(user.uid)
+  const storedIndividual = await env.LEADERBOARD.get(individualKey)
   const users = await readKnownPiUsers(env, week)
   const globalUsers = await readGlobalKnownPiUsers(env)
   const now = new Date().toISOString()
+  let previousIndividual: KnownPiUser | null = null
+
+  if (storedIndividual) {
+    try {
+      previousIndividual = JSON.parse(storedIndividual) as KnownPiUser
+    } catch (error) {
+      console.error('[Pi Auth] failed to parse previous individual Pi user', error)
+    }
+  }
+
+  const individualUser: KnownPiUser = {
+    uid: user.uid,
+    username: user.username || previousIndividual?.username || '',
+    firstSeenAt: previousIndividual?.firstSeenAt || now,
+    lastSeenAt: now,
+  }
   const current = users.find((knownUser) => knownUser.uid === user.uid)
   const nextUsers = current
     ? users.map((knownUser) =>
@@ -615,10 +873,23 @@ async function rememberPiUser(env: Env, user: PiMeResponse, week = getWeeklyPeri
         },
       ]
 
-  const nextGlobalUsers = mergeKnownPiUsers(globalUsers, nextUsers)
+  const nextGlobalUsers = mergeKnownPiUsers(globalUsers, nextUsers, [individualUser])
 
+  await env.LEADERBOARD.put(individualKey, JSON.stringify(individualUser))
   await writeKnownPiUsers(env, getKnownPiUsersKey(week.key), nextUsers, LEADERBOARD_TTL_SECONDS)
   await writeKnownPiUsers(env, GLOBAL_KNOWN_PI_USERS_KEY, nextGlobalUsers)
+
+  console.info('[Pi Auth] user remembered', {
+    uid: individualUser.uid,
+    username: individualUser.username,
+    key: individualKey,
+  })
+}
+
+async function verifyAndRememberPiUser(env: Env, accessToken: string) {
+  const user = await verifyAccessToken(accessToken)
+  await rememberPiUser(env, user)
+  return user
 }
 
 async function incrementVipRewardStats(env: Env, week = getWeeklyPeriod()) {
@@ -774,6 +1045,154 @@ async function writeStoredLeaderboard(env: Env, leaderboard: StoredLeaderboard) 
   })
 }
 
+function buildRewardSettlement(leaderboard: StoredLeaderboard, closedAt = new Date()) {
+  const recipientsByUid = new Map<string, RewardSettlementRecipient>()
+  const rewardedEntries = leaderboard.entries.filter(
+    (entry) =>
+      entry.vip &&
+      entry.rewardEligible &&
+      Boolean(entry.rewardsRank) &&
+      entry.rewardsRank! <= REWARD_RANK_LIMIT &&
+      !entry.piUid.startsWith('guest-') &&
+      entry.piUid !== 'guest-user',
+  )
+
+  rewardedEntries.forEach((entry) => {
+    const share = REWARD_SHARES[(entry.rewardsRank || 1) - 1] || 0
+    const amount = Number((leaderboard.rewards.weeklyPool * share).toFixed(7))
+    if (amount <= 0) return
+
+    const current = recipientsByUid.get(entry.piUid)
+    recipientsByUid.set(entry.piUid, {
+      piUid: entry.piUid,
+      username: entry.name || current?.username || '',
+      amount: Number(((current?.amount || 0) + amount).toFixed(7)),
+      scoreRanks: [...(current?.scoreRanks || []), entry.rewardsRank!],
+      scoreIds: [...(current?.scoreIds || []), entry.id],
+    })
+  })
+
+  const settlement: RewardSettlement = {
+    week: leaderboard.week,
+    weekKey: leaderboard.weekKey,
+    weekStartsAt: leaderboard.weekStartsAt,
+    weekEndsAt: leaderboard.weekEndsAt,
+    closedAt: closedAt.toISOString(),
+    weeklyPool: leaderboard.rewards.weeklyPool,
+    rewardedScores: rewardedEntries.length,
+    entries: leaderboard.entries,
+    recipients: [...recipientsByUid.values()].sort((a, b) => b.amount - a.amount),
+    status: 'ready',
+  }
+
+  return settlement
+}
+
+async function closeWeeklyLeaderboard(env: Env, week: ReturnType<typeof getWeeklyPeriod>, closedAt = new Date()) {
+  if (!env.LEADERBOARD) return null
+
+  const settlementKey = getRewardSettlementKey(week.key)
+  const existingSettlement = await env.LEADERBOARD.get(settlementKey)
+
+  if (existingSettlement) {
+    try {
+      return JSON.parse(existingSettlement) as RewardSettlement
+    } catch (error) {
+      console.error('[Rewards] failed to parse existing settlement', error)
+    }
+  }
+
+  const leaderboard = await readStoredLeaderboard(env, week)
+  const settlement = buildRewardSettlement(leaderboard, closedAt)
+
+  await env.LEADERBOARD.put(settlementKey, JSON.stringify(settlement), {
+    expirationTtl: SETTLEMENT_TTL_SECONDS,
+  })
+
+  console.info('[Rewards] weekly leaderboard closed', {
+    weekKey: settlement.weekKey,
+    weeklyPool: settlement.weeklyPool,
+    rewardedScores: settlement.rewardedScores,
+    recipients: settlement.recipients.length,
+  })
+
+  return settlement
+}
+
+async function upgradeCurrentWeekScoresToVip(env: Env, piUid: string, week = getWeeklyPeriod()) {
+  if (!env.LEADERBOARD || !piUid) return 0
+
+  const leaderboard = await readStoredLeaderboard(env, week)
+  let updatedCount = 0
+  const upgradedEntries = leaderboard.entries.map((entry) => {
+    if (entry.piUid !== piUid || entry.vip) return entry
+
+    updatedCount += 1
+    return {
+      ...entry,
+      vip: true,
+    }
+  })
+
+  if (updatedCount === 0) return 0
+
+  const upgradedLeaderboard = decorateLeaderboard(upgradedEntries, week, leaderboard.rewards)
+  await writeStoredLeaderboard(env, upgradedLeaderboard)
+
+  console.info('[VIP] current-week scores upgraded', {
+    piUid,
+    weekKey: week.key,
+    updatedCount,
+  })
+
+  return updatedCount
+}
+
+async function reconcileCurrentWeekVipEligibility(env: Env, week = getWeeklyPeriod()) {
+  if (!env.LEADERBOARD) return readStoredLeaderboard(env, week)
+
+  const leaderboard = await readStoredLeaderboard(env, week)
+  const candidateUids = [
+    ...new Set(
+      leaderboard.entries
+        .filter((entry) => !entry.vip && entry.piUid && !entry.piUid.startsWith('guest-'))
+        .map((entry) => entry.piUid),
+    ),
+  ]
+
+  if (candidateUids.length === 0) return leaderboard
+
+  const activeVipUids = new Set(
+    (
+      await Promise.all(
+        candidateUids.map(async (piUid) => ((await readVipPass(env, piUid)) ? piUid : null)),
+      )
+    ).filter((piUid): piUid is string => Boolean(piUid)),
+  )
+  let updatedCount = 0
+  const reconciledEntries = leaderboard.entries.map((entry) => {
+    if (entry.vip || !activeVipUids.has(entry.piUid)) return entry
+
+    updatedCount += 1
+    return {
+      ...entry,
+      vip: true,
+    }
+  })
+
+  if (updatedCount === 0) return leaderboard
+
+  const reconciledLeaderboard = decorateLeaderboard(reconciledEntries, week, leaderboard.rewards)
+  await writeStoredLeaderboard(env, reconciledLeaderboard)
+
+  console.info('[VIP] leaderboard eligibility reconciled', {
+    weekKey: week.key,
+    updatedCount,
+  })
+
+  return reconciledLeaderboard
+}
+
 async function storeAppToUserPayment(env: Env, payment: StoredAppToUserPayment) {
   if (!env.LEADERBOARD) {
     throw new Error('Missing LEADERBOARD KV binding')
@@ -822,8 +1241,10 @@ function validateLeaderboardPayload(payload?: ScorePayload) {
 }
 
 async function getLeaderboard(request: Request, env: Env) {
-  const leaderboard = await readStoredLeaderboard(env)
-  return apiJson(request, leaderboard)
+  const leaderboard = await reconcileCurrentWeekVipEligibility(env)
+  return apiJson(request, leaderboard, 200, {
+    'Cache-Control': 'private, max-age=20, stale-while-revalidate=40',
+  })
 }
 
 async function submitLeaderboardScore(request: Request, env: Env) {
@@ -844,12 +1265,19 @@ async function submitLeaderboardScore(request: Request, env: Env) {
   const payload = body!.payload!
   let piUid = payload.piUid!.trim()
   let username = payload.username!.trim()
+  let isVip = false
 
   if (body?.accessToken) {
     try {
-      const user = await verifyAccessToken(body.accessToken)
+      const user = await verifyAndRememberPiUser(env, body.accessToken)
       piUid = user.uid || piUid
       username = user.username || username
+      const { vipPass } = await resolveVipPassForUser(env, user)
+      isVip = Boolean(vipPass?.active)
+
+      if (isVip && user.uid) {
+        await upgradeCurrentWeekScoresToVip(env, user.uid)
+      }
     } catch (error) {
       return apiJson(
         request,
@@ -871,17 +1299,21 @@ async function submitLeaderboardScore(request: Request, env: Env) {
     name: username,
     score: Math.floor(Number(payload.score)),
     games: previousPlayerGames + 1,
-    vip: Boolean(body?.isVip),
+    vip: isVip,
     isPlayer: true,
     week: week.label,
     weekKey: week.key,
     submittedAt: new Date().toISOString(),
     rewardsRank: null,
-    reward: body?.isVip ? 'Global Only' : 'No rewards',
+    reward: isVip ? 'Global Only' : 'No rewards',
     rewardEligible: false,
     rank: 0,
   }
-  const nextLeaderboard = decorateLeaderboard([...currentLeaderboard.entries, entry], week)
+  const nextLeaderboard = decorateLeaderboard(
+    [...currentLeaderboard.entries, entry],
+    week,
+    currentLeaderboard.rewards,
+  )
   const savedEntry = nextLeaderboard.entries.find((row) => row.id === entry.id)
 
   await writeStoredLeaderboard(env, nextLeaderboard)
@@ -891,40 +1323,6 @@ async function submitLeaderboardScore(request: Request, env: Env) {
     entry: savedEntry || entry,
     leaderboard: nextLeaderboard,
   })
-}
-
-async function piServerRequest(env: Env, path: string, init?: RequestInit) {
-  const apiKey = await getPiApiKey(env)
-
-  if (!apiKey) {
-    return json(
-      {
-        error: 'Missing PI_API_KEY',
-      },
-      500,
-    )
-  }
-
-  const response = await fetchWithTimeout(`${PI_API_BASE}${path}`, {
-    ...init,
-    headers: {
-      Authorization: `Key ${apiKey}`,
-      'Content-Type': 'application/json',
-      ...(init?.headers || {}),
-    },
-  })
-
-  const payload = await parseResponsePayload(response)
-
-  if (!response.ok) {
-    console.error('[Pi API] request failed', {
-      path,
-      status: response.status,
-      payload,
-    })
-  }
-
-  return json(payload, response.status)
 }
 
 async function piServerFetch(env: Env, path: string, init?: RequestInit) {
@@ -965,6 +1363,75 @@ async function piServerFetch(env: Env, path: string, init?: RequestInit) {
   }
 }
 
+function isPaymentNotFound(payload: unknown) {
+  if (!payload || typeof payload !== 'object') return false
+
+  const error = 'error' in payload ? String(payload.error || '') : ''
+  const errorMessage = 'error_message' in payload ? String(payload.error_message || '') : ''
+
+  return error === 'payment_not_found' || errorMessage.toLowerCase().includes('no payment found')
+}
+
+async function piPaymentServerFetch(env: Env, path: string, init?: RequestInit) {
+  const candidates = await getPiApiKeyCandidates(env)
+
+  console.info('[Pi API] payment key candidates', {
+    path,
+    sources: candidates.map((candidate) => candidate.source),
+  })
+
+  if (candidates.length === 0) {
+    return {
+      ok: false,
+      status: 500,
+      payload: {
+        error: 'Missing PI_API_KEY',
+      },
+      keySource: 'missing',
+    }
+  }
+
+  let lastResponse: {
+    ok: boolean
+    status: number
+    payload: unknown
+    keySource: string
+  } | null = null
+
+  for (const candidate of candidates) {
+    const response = await fetchWithTimeout(`${PI_API_BASE}${path}`, {
+      ...init,
+      headers: {
+        Authorization: `Key ${candidate.value}`,
+        'Content-Type': 'application/json',
+        ...(init?.headers || {}),
+      },
+    })
+    const payload = await parseResponsePayload(response)
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      payload,
+      keySource: candidate.source,
+    }
+
+    if (response.ok) return result
+
+    console.error('[Pi API] payment request failed', {
+      path,
+      status: response.status,
+      payload,
+      keySource: candidate.source,
+    })
+
+    lastResponse = result
+
+    if (!isPaymentNotFound(payload)) break
+  }
+
+  return lastResponse!
+}
+
 async function verifyPiAuth(request: Request, env: Env) {
   const body = await readJson<AuthVerifyBody>(request)
 
@@ -980,8 +1447,7 @@ async function verifyPiAuth(request: Request, env: Env) {
   }
 
   try {
-    const userPayload = await verifyAccessToken(body.accessToken)
-    await rememberPiUser(env, userPayload)
+    const userPayload = await verifyAndRememberPiUser(env, body.accessToken)
 
     const session = {
       uid: userPayload.uid,
@@ -1031,13 +1497,50 @@ async function approvePayment(request: Request, env: Env) {
   const body = await readJson<ApproveBody>(request)
 
   if (!body?.paymentId) {
-    return json({ error: 'Missing paymentId' }, 400)
+    return apiJson(request, { error: 'Missing paymentId' }, 400)
+  }
+
+  let verifiedUser: PiMeResponse | null = null
+
+  if (body.accessToken) {
+    try {
+      verifiedUser = await verifyAndRememberPiUser(env, body.accessToken)
+    } catch (error) {
+      return apiJson(
+        request,
+        {
+          approved: false,
+          error: error instanceof Error ? error.message : 'Invalid Pi access token',
+        },
+        401,
+      )
+    }
+  }
+
+  if (verifiedUser && isVipPaymentIdentifier(body.identifier)) {
+    const { vipPass: existingPass, matchedBy } = await resolveVipPassForUser(env, verifiedUser)
+
+    if (existingPass?.active) {
+      return apiJson(
+        request,
+        {
+          approved: false,
+          alreadyVip: true,
+          matchedBy,
+          paymentId: body.paymentId,
+          identifier: body.identifier,
+          vipPass: existingPass,
+          error: 'VIP Pass is already active.',
+        },
+        409,
+      )
+    }
   }
 
   if (shouldMockPayments(env)) {
     console.warn('[Pi Payment] mock approve', body.paymentId)
 
-    return json({
+    return apiJson(request, {
       approved: true,
       paymentId: body.paymentId,
       identifier: body.identifier,
@@ -1050,7 +1553,7 @@ async function approvePayment(request: Request, env: Env) {
     identifier: body.identifier,
   })
 
-  const piResponse = await piServerFetch(env, `/payments/${body.paymentId}/approve`, {
+  const piResponse = await piPaymentServerFetch(env, `/payments/${body.paymentId}/approve`, {
     method: 'POST',
   })
 
@@ -1058,10 +1561,12 @@ async function approvePayment(request: Request, env: Env) {
     paymentId: body.paymentId,
     ok: piResponse.ok,
     status: piResponse.status,
+    keySource: piResponse.keySource,
     payload: piResponse.payload,
   })
 
-  return json(
+  return apiJson(
+    request,
     {
       approved: piResponse.ok,
       paymentId: body.paymentId,
@@ -1077,16 +1582,17 @@ async function completePayment(request: Request, env: Env) {
   const body = await readJson<CompleteBody>(request)
 
   if (!body?.paymentId || !body?.txid) {
-    return json({ error: 'Missing paymentId or txid' }, 400)
+    return apiJson(request, { error: 'Missing paymentId or txid' }, 400)
   }
 
   let verifiedUser: PiMeResponse | null = null
 
   if (body.accessToken) {
     try {
-      verifiedUser = await verifyAccessToken(body.accessToken)
+      verifiedUser = await verifyAndRememberPiUser(env, body.accessToken)
     } catch (error) {
-      return json(
+      return apiJson(
+        request,
         {
           completed: false,
           error: error instanceof Error ? error.message : 'Invalid Pi access token',
@@ -1109,7 +1615,7 @@ async function completePayment(request: Request, env: Env) {
           })
         : null
 
-    return json({
+    return apiJson(request, {
       completed: true,
       paymentId: body.paymentId,
       txid: body.txid,
@@ -1119,13 +1625,12 @@ async function completePayment(request: Request, env: Env) {
     })
   }
 
-  const completeResponse = await piServerRequest(env, `/payments/${body.paymentId}/complete`, {
+  const completeResponse = await piPaymentServerFetch(env, `/payments/${body.paymentId}/complete`, {
     method: 'POST',
     body: JSON.stringify({
       txid: body.txid,
     }),
   })
-  const completePayload = await completeResponse.json().catch(() => ({}))
   const vipPass =
     completeResponse.ok && verifiedUser && isVipPaymentIdentifier(body.identifier)
       ? await storeVipPass({
@@ -1137,14 +1642,18 @@ async function completePayment(request: Request, env: Env) {
         })
       : null
 
-  return json(
+  return apiJson(
+    request,
     {
-      ...completePayload,
+      ...(completeResponse.payload && typeof completeResponse.payload === 'object'
+        ? completeResponse.payload
+        : { payload: completeResponse.payload }),
       completed: completeResponse.ok,
       paymentId: body.paymentId,
       txid: body.txid,
       identifier: body.identifier,
       vipPass,
+      keySource: completeResponse.keySource,
     },
     completeResponse.status,
   )
@@ -1154,19 +1663,27 @@ async function getVipStatus(request: Request, env: Env) {
   const body = await readJson<VipStatusBody>(request)
 
   if (!body?.accessToken) {
-    return json({ active: false, error: 'Missing accessToken' }, 400)
+    return apiJson(request, { active: false, error: 'Missing accessToken' }, 400)
   }
 
   try {
-    const user = await verifyAccessToken(body.accessToken)
-    const vipPass = await readVipPass(env, user.uid || '')
+    const user = await verifyAndRememberPiUser(env, body.accessToken)
+    const { vipPass, matchedBy } = await resolveVipPassForUser(env, user)
 
-    return json({
+    if (vipPass?.active && user.uid) {
+      await upgradeCurrentWeekScoresToVip(env, user.uid)
+    }
+
+    return apiJson(request, {
       active: Boolean(vipPass?.active),
+      piUid: user.uid,
+      username: user.username || '',
+      matchedBy,
       vipPass,
     })
   } catch (error) {
-    return json(
+    return apiJson(
+      request,
       {
         active: false,
         error: error instanceof Error ? error.message : 'Invalid Pi access token',
@@ -1174,6 +1691,109 @@ async function getVipStatus(request: Request, env: Env) {
       401,
     )
   }
+}
+
+async function expireVipPass(request: Request, env: Env) {
+  const admin = await requireAdmin(request, env)
+  if (admin.ok === false) return admin.response
+
+  if (!env.LEADERBOARD) {
+    return apiJson(
+      request,
+      {
+        expired: false,
+        error: 'KV is not available.',
+      },
+      500,
+    )
+  }
+
+  const body = await readJson<ExpireVipPassBody>(request)
+  let piUid = body?.piUid?.trim()
+  let verifiedUser: PiMeResponse | null = null
+
+  if (!piUid && body?.accessToken) {
+    try {
+      verifiedUser = await verifyAndRememberPiUser(env, body.accessToken)
+      piUid = verifiedUser.uid
+    } catch (error) {
+      return apiJson(
+        request,
+        {
+          expired: false,
+          error: error instanceof Error ? error.message : 'Invalid Pi access token.',
+        },
+        401,
+      )
+    }
+  }
+
+  if (!piUid) {
+    return apiJson(
+      request,
+      {
+        expired: false,
+        error: 'Missing piUid or accessToken.',
+      },
+      400,
+    )
+  }
+
+  const key = getVipPassKey(piUid)
+  const previousPass = await readVipPass(env, piUid)
+  await (env.LEADERBOARD as DeletableKVNamespace).delete(key)
+
+  let repairedStats: VipRewardStats | null = null
+
+  if (env.LEADERBOARD.list) {
+    const week = getWeeklyPeriod()
+    let cursor: string | undefined
+    const activePasses = new Set<string>()
+
+    do {
+      const page = await env.LEADERBOARD.list({
+        prefix: 'vip-pass:',
+        ...(cursor ? { cursor } : {}),
+      })
+
+      await Promise.all(
+        page.keys.map(async (listedKey) => {
+          const stored = await env.LEADERBOARD!.get(listedKey.name)
+          if (!stored) return
+
+          try {
+            const pass = JSON.parse(stored) as VipPass
+            const passWeek = pass.activatedAt ? getWeeklyPeriod(new Date(pass.activatedAt)) : null
+
+            if (
+              pass.active &&
+              pass.piUid &&
+              pass.expiresAt &&
+              new Date(pass.expiresAt).getTime() > Date.now() &&
+              passWeek?.key === week.key
+            ) {
+              activePasses.add(pass.piUid)
+            }
+          } catch (error) {
+            console.error('[VIP] failed to parse pass during expire stats repair', error)
+          }
+        }),
+      )
+
+      cursor = page.list_complete ? undefined : page.cursor
+    } while (cursor)
+
+    repairedStats = await writeVipRewardStats(env, activePasses.size, week)
+  }
+
+  return apiJson(request, {
+    expired: true,
+    piUid,
+    username: verifiedUser?.username || previousPass?.username || '',
+    hadActivePass: Boolean(previousPass),
+    previousPass,
+    repairedStats,
+  })
 }
 
 async function incompletePayment(request: Request) {
@@ -1386,15 +2006,19 @@ async function getKnownPiUsers(request: Request, env: Env) {
   const recentWeeks = getRecentWeeklyPeriods()
   const knownUsersByWeek = await Promise.all(recentWeeks.map((week) => readKnownPiUsers(env, week)))
   const globalKnownUsers = await readGlobalKnownPiUsers(env)
-  const knownUsers = mergeKnownPiUsers(globalKnownUsers, ...knownUsersByWeek)
+  const individualKnownUsers = await readIndividuallyKnownPiUsers(env)
+  const knownUsers = mergeKnownPiUsers(globalKnownUsers, individualKnownUsers, ...knownUsersByWeek)
   const recentLeaderboards = await Promise.all(recentWeeks.map((week) => readStoredLeaderboard(env, week)))
+  const activeVipPasses = await readActiveVipPasses(env)
+  const activeVipUids = new Set(activeVipPasses.map((pass) => pass.piUid).filter(Boolean))
+  const activeVipUsernames = new Set(activeVipPasses.map((pass) => pass.username.trim().toLowerCase()).filter(Boolean))
   const usersByUid = new Map<string, { uid: string; username: string; vip: boolean; scores: number; bestScore: number }>()
 
   knownUsers.forEach((user) => {
     usersByUid.set(user.uid, {
       uid: user.uid,
       username: user.username,
-      vip: false,
+      vip: activeVipUids.has(user.uid) || activeVipUsernames.has(user.username.trim().toLowerCase()),
       scores: 0,
       bestScore: 0,
     })
@@ -1407,12 +2031,30 @@ async function getKnownPiUsers(request: Request, env: Env) {
     const next = {
       uid: entry.piUid,
       username: entry.name,
-      vip: Boolean(current?.vip || entry.vip),
+      vip: Boolean(
+        current?.vip ||
+          entry.vip ||
+          activeVipUids.has(entry.piUid) ||
+          activeVipUsernames.has(entry.name.trim().toLowerCase()),
+      ),
       scores: (current?.scores || 0) + 1,
       bestScore: Math.max(current?.bestScore || 0, entry.score),
     }
 
     usersByUid.set(entry.piUid, next)
+  })
+
+  activeVipPasses.forEach((pass) => {
+    if (!pass.piUid) return
+
+    const current = usersByUid.get(pass.piUid)
+    usersByUid.set(pass.piUid, {
+      uid: pass.piUid,
+      username: pass.username || current?.username || '',
+      vip: true,
+      scores: current?.scores || 0,
+      bestScore: current?.bestScore || 0,
+    })
   })
 
   const knownUsersFromLeaderboards = [...usersByUid.values()].map((user) => ({
@@ -1441,6 +2083,18 @@ async function addKnownPiUsers(request: Request, env: Env) {
   const admin = await requireAdmin(request, env)
   if (admin.ok === false) return admin.response
 
+  if (!env.LEADERBOARD) {
+    return apiJson(
+      request,
+      {
+        added: false,
+        error: 'KV is not available.',
+      },
+      500,
+    )
+  }
+
+  const leaderboard = env.LEADERBOARD
   const body = await readJson<AdminPiUsersBody>(request)
   const inputUsers = body?.users?.length ? body.users : body?.uid ? [{ uid: body.uid, username: body.username }] : []
   const now = new Date().toISOString()
@@ -1467,6 +2121,9 @@ async function addKnownPiUsers(request: Request, env: Env) {
   const currentUsers = await readGlobalKnownPiUsers(env)
   const nextUsers = mergeKnownPiUsers(currentUsers, usersToAdd)
 
+  await Promise.all(
+    usersToAdd.map((user) => leaderboard.put(getKnownPiUserKey(user.uid), JSON.stringify(user))),
+  )
   await writeKnownPiUsers(env, GLOBAL_KNOWN_PI_USERS_KEY, nextUsers)
 
   return apiJson(request, {
@@ -1483,6 +2140,7 @@ async function inspectPiUsers(request: Request, env: Env) {
 
   const recentWeeks = getRecentWeeklyPeriods()
   const globalKnownUsers = await readGlobalKnownPiUsers(env)
+  const individualKnownUsers = await readIndividuallyKnownPiUsers(env)
   const weeklyKnownUsers = await Promise.all(
     recentWeeks.map(async (week) => ({
       weekKey: week.key,
@@ -1543,6 +2201,7 @@ async function inspectPiUsers(request: Request, env: Env) {
   )
   const mergedUsers = mergeKnownPiUsers(
     globalKnownUsers,
+    individualKnownUsers,
     ...weeklyKnownUsers.map(({ users }) => users),
     leaderboardUsers,
     vipPasses,
@@ -1725,6 +2384,11 @@ export default {
       return repairVipStats(request, env)
     }
 
+    if (pathname === '/api/admin/vip-pass/expire') {
+      if (request.method !== 'POST') return methodNotAllowed(pathname, request.method)
+      return expireVipPass(request, env)
+    }
+
     if (pathname === '/api/pi/vip/status') {
       if (request.method !== 'POST') return methodNotAllowed(pathname, request.method)
       return getVipStatus(request, env)
@@ -1746,5 +2410,16 @@ export default {
 
     const assetResponse = await env.ASSETS.fetch(getAssetRequest(request, pathname))
     return withAppHeaders(assetResponse)
+  },
+
+  async scheduled(
+    controller: { scheduledTime: number },
+    env: Env,
+    context: { waitUntil(promise: Promise<unknown>): void },
+  ) {
+    const currentWeek = getWeeklyPeriod(new Date(controller.scheduledTime))
+    const previousWeek = getWeeklyPeriod(new Date(new Date(currentWeek.startsAt).getTime() - 1))
+
+    context.waitUntil(closeWeeklyLeaderboard(env, previousWeek, new Date(controller.scheduledTime)))
   },
 }

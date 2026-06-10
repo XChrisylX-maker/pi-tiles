@@ -1,5 +1,6 @@
 import type { Board, ScorePayload } from '../game/gameEngine'
 import { validateScoreSubmission } from '../game/gameEngine'
+import { apiUrl } from './apiUrl'
 
 export const VIP_PRICE_PI = 1
 export const VIP_POOL_SHARE = 0.2
@@ -83,7 +84,7 @@ async function parseLeaderboardResponse(response: Response) {
 }
 
 export async function fetchWeeklyLeaderboard(): Promise<WeeklyLeaderboard> {
-  const response = await fetch('/api/leaderboard', {
+  const response = await fetch(apiUrl('/api/leaderboard'), {
     method: 'GET',
     headers: {
       Accept: 'application/json',
@@ -117,7 +118,7 @@ export async function submitScoreToLeaderboard({
   }
 
   try {
-    const response = await fetch('/api/leaderboard/scores', {
+    const response = await fetch(apiUrl('/api/leaderboard/scores'), {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
