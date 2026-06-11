@@ -63,6 +63,7 @@ const MAX_CASCADE_STEPS = 64
 const SWIPE_THRESHOLD_PX = 14
 const PI_CONNECT_UI_TIMEOUT_MS = 12000
 const SHOW_PI_DEBUG_PANEL = import.meta.env.DEV
+const COLUMN_FALL_DELAYS = [8, 0, 12, 4, 16] as const
 
 type TileDragStart = {
   index: number
@@ -188,6 +189,7 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
   const [bonusBursts, setBonusBursts] = useState<BonusBurst[]>([])
   const [isBoardQuaking, setIsBoardQuaking] = useState(false)
   const [isRefilling, setIsRefilling] = useState(false)
+  const [refillCascadeStep, setRefillCascadeStep] = useState(0)
   const [isAnimatingResolution, setIsAnimatingResolution] = useState(false)
   const [securityNote, setSecurityNote] = useState(
     'Connect Pioneer to enable Pi username and VIP payment.',
@@ -201,6 +203,7 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
   const bonusBurstId = useRef(0)
   const suppressNextTileClick = useRef(false)
   const submitInFlight = useRef(false)
+  const leaderboardRevision = useRef(0)
   const [rewardPool, setRewardPool] = useState<RewardPool>(() => calculateRewardPool(0))
   const { vipMembers, weeklyPool } = rewardPool
 
@@ -401,11 +404,12 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
 
     async function loadLeaderboard() {
       if (document.visibilityState === 'hidden') return
+      const requestedRevision = leaderboardRevision.current
 
       try {
         const weeklyLeaderboard = await fetchWeeklyLeaderboard()
 
-        if (cancelled) return
+        if (cancelled || requestedRevision !== leaderboardRevision.current) return
 
         setLeaderboard(weeklyLeaderboard.entries)
         setLeaderboardWeek(weeklyLeaderboard.week)
@@ -431,6 +435,20 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
     }
   }, [playing])
 
+  useEffect(() => {
+    if (!piUser?.piUid) return
+
+    const playerBest = leaderboard.reduce(
+      (highestScore, entry) =>
+        entry.piUid === piUser.piUid ? Math.max(highestScore, entry.score) : highestScore,
+      0,
+    )
+
+    if (playerBest > 0) {
+      setBest((currentBest) => Math.max(currentBest, playerBest))
+    }
+  }, [leaderboard, piUser?.piUid])
+
   const start = useCallback(() => {
     clearAnimationTimers()
     playStartSound()
@@ -443,6 +461,7 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
     setFallDistances([])
     setNewTiles([])
     setIsRefilling(false)
+    setRefillCascadeStep(0)
     setIsAnimatingResolution(false)
     setScore(0)
     setCombo(0)
@@ -505,8 +524,12 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
       }
 
       playSuccessSound()
+      leaderboardRevision.current += 1
       setLastPayload(payload)
-      setLeaderboard(result.leaderboard?.entries || ((rows) => mergeLeaderboardEntry(rows, result.entry!)))
+      setBest((currentBest) => Math.max(currentBest, finalScore, result.entry!.score))
+      setLeaderboard((rows) =>
+        mergeLeaderboardEntry(result.leaderboard?.entries || rows, result.entry!),
+      )
       setLeaderboardWeek(result.leaderboard?.week || payload.week)
       if (result.leaderboard?.rewards) setRewardPool(result.leaderboard.rewards)
       setSubmitted(true)
@@ -668,6 +691,7 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
       }
 
       if (isVisibleCascade) {
+        const cascadePace = Math.max(0.78, 1 - stepIndex * 0.055)
         const piBonusLabel = step.piBonus > 0 ? ` · PI BONUS +${step.piBonus}` : ''
 
         if (step.matched >= 8) {
@@ -681,18 +705,21 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
         }
 
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, isAndroidApp ? 95 : MATCH_FLASH_MS)
+          const matchDelay = Math.round((isAndroidApp ? 95 : MATCH_FLASH_MS) * cascadePace)
+          const timer = setTimeout(resolve, matchDelay)
           animationTimers.current.push(timer)
         })
 
         setLastMatches([])
         setFallDistances(step.fallDistances)
         setNewTiles(step.newTileIndexes)
+        setRefillCascadeStep(stepIndex)
         setIsRefilling(true)
         setBoard(step.board)
 
         await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, isAndroidApp ? 180 : REFILL_ANIMATION_MS)
+          const refillDelay = Math.round((isAndroidApp ? 180 : REFILL_ANIMATION_MS) * cascadePace)
+          const timer = setTimeout(resolve, refillDelay)
           animationTimers.current.push(timer)
         })
 
@@ -710,6 +737,7 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
     setValidMoves((currentMoves) => currentMoves + 1)
     setBoard(currentBoard)
     setIsAnimatingResolution(false)
+    setRefillCascadeStep(0)
     setLastSwap([])
 
     if (findMatches(currentBoard).length > 0) {
@@ -1096,8 +1124,13 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
                 const matched = lastMatches.includes(index)
                 const isNewTile = newTiles.includes(index)
                 const fallDistance = fallDistances[index] || 0
+                const cascadePace = Math.max(0.78, 1 - refillCascadeStep * 0.055)
                 const fallDelay =
-                  fallDistance > 0 ? Math.min(42, fallDistance * 4 + ((index * 7 + fallDistance * 5) % 17)) : 0
+                  fallDistance > 0
+                    ? COLUMN_FALL_DELAYS[index % BOARD_SIZE] + ((Math.floor(index / BOARD_SIZE) * 3 + fallDistance) % 7)
+                    : 0
+                const fallDuration =
+                  fallDistance > 0 ? Math.round((180 + Math.min(5, fallDistance) * 12) * cascadePace) : 180
                 const fallDrift =
                   fallDistance > 0
                     ? (index % BOARD_SIZE - 2) * 1.4 + (fallDistance % 2 === 0 ? 1.2 : -1.2)
@@ -1118,6 +1151,7 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
                       {
                         '--fall-y': `${-fallDistance * TILE_SIZE_PX}px`,
                         '--fall-delay': `${fallDelay}ms`,
+                        '--fall-duration': `${fallDuration}ms`,
                         '--fall-drift': `${fallDrift}px`,
                         '--swap-col': swapMotion.col,
                         '--swap-row': swapMotion.row,

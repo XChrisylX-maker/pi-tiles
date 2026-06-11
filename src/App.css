@@ -2877,15 +2877,15 @@ body {
 
 .board-wrap.is-refilling .tile.is-falling {
   animation:
-    gravity-polish-fall 245ms cubic-bezier(.18,.78,.2,1) both,
-    gravity-polish-glow 210ms ease-out both !important;
+    gravity-polish-fall var(--fall-duration, 230ms) cubic-bezier(.18,.78,.2,1) both,
+    gravity-polish-glow var(--fall-duration, 230ms) ease-out both !important;
   animation-delay: var(--fall-delay, 0ms), var(--fall-delay, 0ms) !important;
 }
 
 .board-wrap.is-refilling .tile.is-new-tile {
   animation:
-    new-tile-drop 275ms cubic-bezier(.16,.76,.2,1) both,
-    new-tile-spark 250ms ease-out both !important;
+    new-tile-drop calc(var(--fall-duration, 230ms) + 15ms) cubic-bezier(.16,.76,.2,1) both,
+    new-tile-spark var(--fall-duration, 230ms) ease-out both !important;
   animation-delay: var(--fall-delay, 0ms), var(--fall-delay, 0ms) !important;
 }
 
@@ -3123,11 +3123,11 @@ body {
 
 @keyframes new-tile-drop {
   0% {
-    opacity: .34;
+    opacity: .58;
     transform:
-      translate3d(calc(var(--fall-drift, 0px) * 1.15), var(--fall-y, -160px), 0)
-      scale(.9);
-    filter: brightness(1.24) saturate(1.16) blur(.7px);
+      translate3d(calc(var(--fall-drift, 0px) * 1.08), var(--fall-y, -160px), 0)
+      scale(.96);
+    filter: brightness(1.1) saturate(1.06);
   }
 
   20% {
@@ -3137,14 +3137,14 @@ body {
   74% {
     transform:
       translate3d(calc(var(--fall-drift, 0px) * .08), 1px, 0)
-      scale(1.012);
-    filter: brightness(1.06) saturate(1.03) blur(0);
+      scale(1.006);
+    filter: brightness(1.025) saturate(1.015);
   }
 
   100% {
     opacity: 1;
     transform: translate3d(0, 0, 0) scale(1);
-    filter: brightness(1) saturate(1) blur(0);
+    filter: brightness(1) saturate(1);
   }
 }
 
@@ -3152,9 +3152,9 @@ body {
   0% {
     box-shadow:
       0 10px 22px rgba(0,0,0,.18),
-      0 0 30px rgba(125,249,255,.48),
-      0 0 42px rgba(255,255,255,.28),
-      inset 0 2px 0 rgba(255,255,255,.62);
+      0 0 18px rgba(125,249,255,.26),
+      0 0 26px rgba(255,255,255,.14),
+      inset 0 2px 0 rgba(255,255,255,.52);
   }
 
   100% {

@@ -133,17 +133,6 @@ function addIndex(target: Set<number>, row: number, col: number) {
   target.add(indexOf(row, col))
 }
 
-function addLineBlast(target: Set<number>, row: number, col: number, horizontal: boolean) {
-  for (let i = 0; i < BOARD_SIZE; i += 1) {
-    target.add(horizontal ? indexOf(row, i) : indexOf(i, col))
-  }
-}
-
-function addCrossBlast(target: Set<number>, row: number, col: number) {
-  addLineBlast(target, row, col, true)
-  addLineBlast(target, row, col, false)
-}
-
 function addSquareBlast(target: Set<number>, centerRow: number, centerCol: number, radius = 1) {
   for (let row = centerRow - radius; row <= centerRow + radius; row += 1) {
     for (let col = centerCol - radius; col <= centerCol + radius; col += 1) {
@@ -232,24 +221,9 @@ export function findMatches(board: Board): number[] {
   runs.forEach((run) => {
     run.indexes.forEach((index) => matches.add(index))
 
-    const runSymbol = board[run.indexes[0]].symbol
-    const isPiRun = runSymbol === 'π'
     const piBombs = run.indexes.filter((index) => board[index].power === 'pi-bomb')
 
-    // Standard match bonuses for non-Pi symbols.
-    if (!isPiRun && run.length === 4) {
-      addLineBlast(matches, run.row, run.col, run.horizontal)
-    }
-
-    if (!isPiRun && run.length >= 5) {
-      addCrossBlast(matches, run.row, run.col)
-      addSquareBlast(matches, run.row, run.col, 1)
-    }
-
-    if (!isPiRun && run.length >= 6) {
-      addSquareBlast(matches, run.row, run.col, 2)
-    }
-
+    // Only an explicit Pi bomb may clear tiles outside the matched run.
     piBombs.forEach((index) => {
       addSquareBlast(matches, rowOf(index), colOf(index), 1)
     })

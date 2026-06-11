@@ -158,5 +158,6 @@ export async function submitScoreToLeaderboard({
 }
 
 export function mergeLeaderboardEntry(rows: LeaderboardEntry[], entry: LeaderboardEntry): LeaderboardEntry[] {
-  return [...rows, entry].sort((a, b) => b.score - a.score)
+  const rowsWithoutEntry = rows.filter((row) => row.id !== entry.id)
+  return [...rowsWithoutEntry, entry].sort((a, b) => b.score - a.score)
 }
