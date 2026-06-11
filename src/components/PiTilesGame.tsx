@@ -1096,8 +1096,12 @@ export function PiTilesGame({ platform }: PiTilesGameProps) {
                 const matched = lastMatches.includes(index)
                 const isNewTile = newTiles.includes(index)
                 const fallDistance = fallDistances[index] || 0
-                const fallDelay = fallDistance > 0 ? Math.min(68, (index % BOARD_SIZE) * 10 + fallDistance * 7) : 0
-                const fallDrift = fallDistance > 0 ? (((index % BOARD_SIZE) - 2) * 3.8 + (fallDistance % 2 === 0 ? 2.4 : -2.4)) : 0
+                const fallDelay =
+                  fallDistance > 0 ? Math.min(42, fallDistance * 4 + ((index * 7 + fallDistance * 5) % 17)) : 0
+                const fallDrift =
+                  fallDistance > 0
+                    ? (index % BOARD_SIZE - 2) * 1.4 + (fallDistance % 2 === 0 ? 1.2 : -1.2)
+                    : 0
                 const swapMotion = getSwapMotion(index, invalid ? invalidSwap : lastSwap)
                 const tilePower = getTilePower(tile)
 

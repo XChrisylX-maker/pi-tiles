@@ -2877,15 +2877,15 @@ body {
 
 .board-wrap.is-refilling .tile.is-falling {
   animation:
-    gravity-polish-fall 220ms cubic-bezier(.12,.88,.18,1) both,
-    gravity-polish-glow 190ms ease-out both !important;
+    gravity-polish-fall 245ms cubic-bezier(.18,.78,.2,1) both,
+    gravity-polish-glow 210ms ease-out both !important;
   animation-delay: var(--fall-delay, 0ms), var(--fall-delay, 0ms) !important;
 }
 
 .board-wrap.is-refilling .tile.is-new-tile {
   animation:
-    new-tile-drop 260ms cubic-bezier(.1,.86,.16,1) both,
-    new-tile-spark 260ms ease-out both !important;
+    new-tile-drop 275ms cubic-bezier(.16,.76,.2,1) both,
+    new-tile-spark 250ms ease-out both !important;
   animation-delay: var(--fall-delay, 0ms), var(--fall-delay, 0ms) !important;
 }
 
@@ -3063,25 +3063,19 @@ body {
 
 @keyframes gravity-polish-fall {
   0% {
-    opacity: .9;
+    opacity: .94;
     transform:
       translate3d(var(--fall-drift, 0px), var(--fall-y, -112px), 0)
-      scale(.98);
-    filter: brightness(1.08) saturate(1.04);
+      scale(.985);
+    filter: brightness(1.06) saturate(1.03);
   }
 
-  54% {
+  72% {
     opacity: 1;
     transform:
-      translate3d(calc(var(--fall-drift, 0px) * -.46), 8px, 0)
-      scale(1.045);
-    filter: brightness(1.08) saturate(1.04);
-  }
-
-  78% {
-    transform:
-      translate3d(calc(var(--fall-drift, 0px) * .12), -2px, 0)
-      scale(.99);
+      translate3d(calc(var(--fall-drift, 0px) * .1), 1px, 0)
+      scale(1.008);
+    filter: brightness(1.025) saturate(1.015);
   }
 
   100% {
@@ -3129,28 +3123,22 @@ body {
 
 @keyframes new-tile-drop {
   0% {
-    opacity: 0;
+    opacity: .34;
     transform:
-      translate3d(calc(var(--fall-drift, 0px) * 1.4), var(--fall-y, -160px), 0)
-      scale(.72);
-    filter: brightness(1.6) saturate(1.42) blur(2px);
+      translate3d(calc(var(--fall-drift, 0px) * 1.15), var(--fall-y, -160px), 0)
+      scale(.9);
+    filter: brightness(1.24) saturate(1.16) blur(.7px);
   }
 
-  24% {
+  20% {
     opacity: 1;
   }
 
-  60% {
+  74% {
     transform:
-      translate3d(calc(var(--fall-drift, 0px) * -.42), 10px, 0)
-      scale(1.08);
-    filter: brightness(1.18) saturate(1.08) blur(0);
-  }
-
-  82% {
-    transform:
-      translate3d(calc(var(--fall-drift, 0px) * .12), -3px, 0)
-      scale(.99);
+      translate3d(calc(var(--fall-drift, 0px) * .08), 1px, 0)
+      scale(1.012);
+    filter: brightness(1.06) saturate(1.03) blur(0);
   }
 
   100% {
