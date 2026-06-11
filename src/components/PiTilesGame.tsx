@@ -100,7 +100,7 @@ function getTilePower(tile: Board[number]) {
 }
 
 function formatBonusBubble(score: number) {
-  return `+${score} !!!`
+  return `+${score}`
 }
 
 function withUiTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {

@@ -2945,11 +2945,14 @@ body {
 }
 
 .bonus-burst span {
+  display: grid;
   width: 78%;
+  height: 78%;
+  place-items: center;
   color: #ffffff;
   font-size: clamp(23px, 7vw, 38px);
   font-weight: 950;
-  line-height: .86;
+  line-height: 1;
   text-align: center;
   text-shadow:
     0 3px 0 rgba(73, 18, 116, 1),
